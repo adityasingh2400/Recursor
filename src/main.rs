@@ -22,7 +22,8 @@ mod hooks;
 mod platform;
 mod state;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use platform::{create_window_manager, WindowManager};
 use state::StateManager;
@@ -62,6 +63,12 @@ enum Commands {
 
     /// Clear saved state
     Clear,
+
+    /// Check if a shell command is still pending after timeout (failsafe)
+    CheckIdle {
+        /// The conversation ID to check
+        conversation_id: String,
+    },
 }
 
 fn main() {
@@ -82,6 +89,7 @@ fn run() -> Result<()> {
         Commands::Status => cmd_status(),
         Commands::Permissions => cmd_permissions(),
         Commands::Clear => cmd_clear(),
+        Commands::CheckIdle { conversation_id } => cmd_check_idle(&conversation_id),
     }
 }
 
@@ -140,7 +148,8 @@ fn cmd_save(_no_focus: bool) -> Result<()> {
     Ok(())
 }
 
-/// Restore command - called by stop hook
+/// Restore command - called by stop hook when agent finishes
+/// ALWAYS brings user to Cursor so they can see the results
 fn cmd_restore() -> Result<()> {
     let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
@@ -154,41 +163,17 @@ fn cmd_restore() -> Result<()> {
         .and_then(|i| i.common.conversation_id.clone())
         .unwrap_or_else(|| "default".to_string());
 
-    // Get the saved state to check what window user was in
-    let conv_state = state_mgr.load_conversation(&conversation_id)?;
-    
-    // Get current active window to check if user is already in Cursor
+    // Get current window to pause YouTube if needed
     let current_window = wm.get_active_window().ok();
-    let already_in_cursor = current_window
-        .as_ref()
-        .map(|w| w.is_cursor())
-        .unwrap_or(false);
-
-    // Pause YouTube if user is in Chrome (before switching to Cursor)
     if let Some(ref current) = current_window {
         if current.app_name == "Google Chrome" {
             wm.pause_youtube_if_playing(&current.title);
         }
     }
 
-    // If user is NOT in Cursor, bring them back
-    if !already_in_cursor {
-        if let Some(ref state) = conv_state {
-            if let Some(ref cursor_win) = state.cursor_window {
-                // Focus the specific Cursor window
-                if wm.focus_cursor_window(cursor_win).is_err() {
-                    // Fallback to generic Cursor focus
-                    let _ = wm.focus_cursor();
-                }
-            } else {
-                // No specific window saved, use generic focus
-                let _ = wm.focus_cursor();
-            }
-        } else {
-            // No state found, just focus Cursor
-            let _ = wm.focus_cursor();
-        }
-    }
+    // Small delay then ALWAYS bring user to Cursor
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let _ = wm.focus_cursor();
 
     // Update menu bar status
     wm.update_menu_bar_status("idle", None);
@@ -203,69 +188,37 @@ fn cmd_restore() -> Result<()> {
 }
 
 /// BeforeShell command - called before every shell execution.
-/// We check if the command is in the user's allowlist:
-/// - If YES (auto-approved): do nothing, let it run silently
-/// - If NO (needs approval): save current window, bring user back to Cursor and pause YouTube
-///   afterShellExecution will switch them back when the command completes
+/// Instead of immediately bringing user to Cursor, we save state and spawn a 5-second
+/// failsafe timer. If the command is still pending after 5 seconds, the failsafe
+/// brings the user to Cursor.
 fn cmd_before_shell() -> Result<()> {
-    let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
 
     // Read hook input to get the command
     let input: Option<hooks::BeforeShellInput> = hooks::try_read_input();
-    let command = input
-        .as_ref()
-        .and_then(|i| i.command.clone())
-        .unwrap_or_default();
     
     let conversation_id = input
         .as_ref()
         .and_then(|i| i.common.conversation_id.clone())
         .unwrap_or_else(|| "default".to_string());
 
-    // Read the allowlist from Cursor's database
-    let allowlist = platform::macos::read_cursor_allowlist().unwrap_or_default();
+    // Get current window
+    let wm = create_window_manager();
+    let current_window = wm.get_active_window().ok();
     
-    // Check if this command is auto-approved
-    let is_allowed = platform::macos::is_command_allowed(&command, &allowlist);
-    
-    if !is_allowed {
-        // Command needs approval - save current window, then bring user back to Cursor
-        
-        // Get current window (this is where the user is - e.g., Chrome/YouTube)
-        let current_window = wm.get_active_window().ok();
-        
-        // Save this window so afterShellExecution can return to it
-        if let Some(ref current) = current_window {
-            // Only save if user is NOT already in Cursor
-            if !current.is_cursor() {
-                // Use a special key for shell-triggered saves
-                let shell_conv_id = format!("{}_shell", conversation_id);
-                state_mgr.save_conversation(&shell_conv_id, current.clone(), None)?;
-                
-                // Pause YouTube if user is watching
-                if current.app_name == "Google Chrome" {
-                    wm.pause_youtube_if_playing(&current.title);
-                }
-            }
+    // Only do something if user is NOT in Cursor
+    if let Some(ref current) = current_window {
+        if !current.is_cursor() {
+            // User is in another app (e.g., YouTube)
+            // Save state so we can bring them back after the command completes
+            let shell_conv_id = format!("{}_shell", conversation_id);
+            state_mgr.save_conversation(&shell_conv_id, current.clone(), None)?;
+            
+            // Spawn a 5-second failsafe timer
+            // If the command is still pending after 5 seconds, check-idle will bring user to Cursor
+            spawn_failsafe_timer(&conversation_id);
         }
-        
-        // Bring user back to Cursor
-        // First try to use the original conversation's Cursor window
-        if let Some(state) = state_mgr.load_conversation(&conversation_id)? {
-            if let Some(ref cursor_win) = state.cursor_window {
-                let _ = wm.focus_cursor_window(cursor_win);
-            } else {
-                let _ = wm.focus_cursor();
-            }
-        } else {
-            let _ = wm.focus_cursor();
-        }
-        
-        // Update menu bar status
-        wm.update_menu_bar_status("approval_needed", Some(&command));
     }
-    // If allowed, do nothing - let the command run while user watches their video
 
     // Always allow the command to proceed
     let output = serde_json::json!({ "permission": "allow" });
@@ -273,8 +226,50 @@ fn cmd_before_shell() -> Result<()> {
     Ok(())
 }
 
+/// Spawn a background process that will check if the shell command is still pending after 5 seconds
+fn spawn_failsafe_timer(conversation_id: &str) {
+    use std::process::{Command, Stdio};
+
+    // Get the path to the recursor binary
+    let recursor_path = std::env::current_exe().unwrap_or_else(|_| "recursor".into());
+
+    #[cfg(unix)]
+    {
+        // On Unix, use sh -c with sleep and recursor check-idle
+        let cmd = format!(
+            "sleep 5 && {:?} check-idle {}",
+            recursor_path,
+            conversation_id
+        );
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(&cmd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, use cmd /c with timeout
+        let cmd = format!(
+            "timeout /t 5 /nobreak >nul && {:?} check-idle {}",
+            recursor_path,
+            conversation_id
+        );
+        let _ = Command::new("cmd")
+            .arg("/c")
+            .arg(&cmd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
+
 /// AfterShell command - called after a shell command has run.
-/// Switch user back to the saved window (e.g. YouTube) and resume.
+/// Switch user back to where they were (e.g., YouTube) if we brought them to Cursor.
 fn cmd_after_shell() -> Result<()> {
     let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
@@ -297,14 +292,14 @@ fn cmd_after_shell() -> Result<()> {
         .and_then(|i| i.common.conversation_id.clone())
         .unwrap_or_else(|| "default".to_string());
 
-    // Check for shell-specific saved state first
+    // Check for shell-specific saved state
     let shell_conv_id = format!("{}_shell", conversation_id);
     
     if let Some(state) = state_mgr.load_conversation(&shell_conv_id)? {
-        // We have a shell-specific save - this means beforeShellExecution brought user to Cursor
+        // We saved state in beforeShellExecution, meaning we brought user to Cursor
+        // Now bring them back to where they were
         let prev = &state.saved_window;
         
-        // Switch back to the saved window
         std::thread::sleep(std::time::Duration::from_millis(100));
         let _ = wm.focus_window(prev);
         
@@ -317,11 +312,53 @@ fn cmd_after_shell() -> Result<()> {
         // Clear the shell-specific state
         state_mgr.clear_conversation(&shell_conv_id)?;
         
-        // Update menu bar
         wm.update_menu_bar_status("working", Some(&prev.title));
     }
-    // If no shell-specific state, the command was auto-approved and user stayed on their video
-    // Nothing to do
+
+    Ok(())
+}
+
+/// CheckIdle command - failsafe that brings user to Cursor if shell command is still pending
+/// Called by background timer spawned in beforeShellExecution after 5 seconds
+fn cmd_check_idle(conversation_id: &str) -> Result<()> {
+    let wm = create_window_manager();
+    let state_mgr = StateManager::new()?;
+
+    // Check for shell-specific saved state
+    let shell_conv_id = format!("{}_shell", conversation_id);
+
+    if let Some(state) = state_mgr.load_conversation(&shell_conv_id)? {
+        // Verify that at least 5 seconds have actually elapsed since state was saved
+        // This prevents race conditions where timer fires but command just started
+        let elapsed = Utc::now() - state.saved_at;
+        if elapsed.num_seconds() < 5 {
+            // Not enough time has passed, don't bring user to Cursor yet
+            return Ok(());
+        }
+        
+        // State still exists after 5 seconds - command is likely waiting for approval
+        // This is our failsafe: bring user to Cursor
+        
+        // Pause YouTube if user was watching
+        if state.saved_window.app_name == "Google Chrome" {
+            wm.pause_youtube_if_playing(&state.saved_window.title);
+        }
+        
+        // Get the Cursor window from the main conversation state
+        if let Some(main_state) = state_mgr.load_conversation(conversation_id)? {
+            if let Some(ref cursor_win) = main_state.cursor_window {
+                let _ = wm.focus_cursor_window(cursor_win);
+            } else {
+                let _ = wm.focus_cursor();
+            }
+        } else {
+            let _ = wm.focus_cursor();
+        }
+
+        // Update menu bar to indicate we're waiting for approval
+        wm.update_menu_bar_status("approval_needed", Some(&state.saved_window.title));
+    }
+    // If state doesn't exist, command already finished - do nothing
 
     Ok(())
 }
