@@ -1,6 +1,6 @@
 # Recursor
 
-**Automatically bounce back to what you were doing while Cursor works.**
+**Switch back to what you were doing while Cursor works. Get pulled back when it needs you.**
 
 ---
 
@@ -23,54 +23,57 @@ Download and double-click:
 curl -fsSL https://raw.githubusercontent.com/adityasingh2400/Recursor/main/install.sh | sh
 ```
 
-Then restart Cursor. Done.
+Then restart Cursor.
 
 ---
 
 ## What It Does
 
-Recursor intelligently manages your focus while Cursor AI agents work:
+1. You're watching YouTube or doing something else
+2. You switch to Cursor, submit a prompt, and the agent starts working
+3. Recursor sends you back to YouTube
+4. When the agent needs approval for a command, you get pulled back to Cursor
+5. After you approve, you go back to YouTube
+6. When the agent finishes, you get pulled back to Cursor to see the results
 
-### Smart Window Switching
-1. You're watching YouTube (or doing anything else)
-2. You switch to Cursor and submit a prompt
-3. **Recursor sends you back to YouTube** while the AI works
-4. **Cursor pops back up only when needed:**
-   - When the agent needs your permission to run a command
-   - When the agent finishes working
+If you're watching YouTube, Recursor pauses the video when pulling you to Cursor and resumes it when sending you back.
 
-### YouTube Auto Pause/Play
-When you're watching YouTube and the agent needs your attention:
-- **Video automatically pauses** when you're brought to Cursor
-- **Video automatically resumes** when you're sent back
+---
 
-### Command Allowlist Integration
-Recursor reads your Cursor command allowlist:
-- **Allowlisted commands** run silently — you stay on YouTube
-- **Non-allowlisted commands** bring you to Cursor for approval, then send you back
+## macOS Setup (Required)
 
-No more staring at loading screens. No more missing important agent prompts.
+macOS needs Accessibility permissions to switch windows. **You must enable this or Recursor won't work.**
+
+1. Open **System Settings** → **Privacy & Security** → **Accessibility**
+2. Click the **+** button
+3. Add **Terminal** (or whatever terminal app you use)
+4. Make sure the toggle is **ON**
+
+To verify it's working:
+```bash
+recursor permissions
+```
+
+If you see "OK" for window access, you're good.
 
 ---
 
 ## How It Works
 
-Recursor uses Cursor's hooks system to intercept key events:
+Recursor hooks into Cursor's event system:
 
-| Hook | What Recursor Does |
-|------|-------------------|
-| `beforeSubmitPrompt` | Saves your current window, sends you back to it |
-| `beforeShellExecution` | If command needs approval: pauses YouTube, brings you to Cursor |
-| `afterShellExecution` | Sends you back to your window, resumes YouTube |
-| `stop` | Brings you back to Cursor when agent finishes |
+| Event | What Happens |
+|-------|--------------|
+| You submit a prompt | Recursor saves your current window and sends you back to it |
+| Agent runs a command | If it needs approval, pulls you to Cursor. Otherwise runs silently. |
+| Command finishes | Sends you back to your window |
+| Agent finishes | Pulls you to Cursor to see the results |
 
 ---
 
-## Setup Instructions
+## Manual Setup
 
-### After Installation
-
-The installer automatically sets up the hooks in `~/.cursor/hooks.json`. If you need to manually configure them, create this file:
+The installer sets up `~/.cursor/hooks.json` automatically. If you need to do it manually:
 
 ```json
 {
@@ -92,67 +95,43 @@ The installer automatically sets up the hooks in `~/.cursor/hooks.json`. If you 
 }
 ```
 
-Replace `YOUR_USERNAME` with your actual username (run `whoami` to find it).
-
-### macOS Permissions
-
-On first run, macOS will ask for Accessibility permissions. Grant them:
-
-1. System Preferences → Privacy & Security → Accessibility
-2. Enable **Terminal** (or **Cursor** if running from there)
-3. Run `recursor permissions` to verify
+Replace `YOUR_USERNAME` with your actual username (`whoami` to find it).
 
 ---
 
-## Why Recursor?
+## Requirements
 
-### Zero Dependencies
-Written in **Rust** — compiles to a single 2MB binary. No Node.js, Python, or npm required. Just download and run.
-
-### Zero Config  
-One command installs everything. No config files to edit, no environment variables to set.
-
-### Multi-Window Support
-Have multiple Cursor windows open? Recursor tracks each one separately and returns you to the correct window.
-
-### Cross-Platform
-Works on macOS, Windows, and Linux with native system APIs.
+| Platform | What You Need |
+|----------|---------------|
+| macOS | Enable Accessibility permission (see above) |
+| Windows | Nothing extra |
+| Linux | Install xdotool: `sudo apt install xdotool` |
 
 ---
 
 ## Commands
 
 ```bash
-recursor status       # See saved state
-recursor permissions  # Fix macOS permissions
-recursor clear        # Reset state
+recursor status       # Check current state
+recursor permissions  # Test if permissions are working (macOS)
+recursor clear        # Reset saved state
 ```
-
----
-
-## Requirements
-
-| Platform | Requirement |
-|----------|-------------|
-| macOS | Grant Accessibility permission when prompted |
-| Windows | None |
-| Linux | Install xdotool: `sudo apt install xdotool` |
 
 ---
 
 ## Troubleshooting
 
-**Not working on macOS?**  
-System Preferences → Privacy & Security → Accessibility → Enable Terminal or Recursor
+**Window switching not working on macOS?**  
+You need to enable Accessibility permissions. System Settings → Privacy & Security → Accessibility → Add and enable Terminal.
 
-**Cursor not coming back?**  
-Run `recursor status` to check if it's saving correctly
+**Not getting pulled back to Cursor?**  
+Run `recursor status` to see if state is being saved properly.
 
 **YouTube not pausing/resuming?**  
-Make sure Chrome is the browser you're using. Safari support coming soon.
+Only works with Chrome right now.
 
-**Commands running without bringing you to Cursor?**  
-The command is probably in your allowlist. Check Cursor settings → Agent → Command Allowlist.
+**Commands running without asking for approval?**  
+That command is in your Cursor allowlist. Check Cursor settings → Agent → Command Allowlist.
 
 ---
 
