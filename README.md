@@ -1,6 +1,6 @@
 # Recursor
 
-**Automatically bounce back to what you were doing while Cursor AI works.**
+**Automatically bounce back to what you were doing while Cursor works.**
 
 ---
 
