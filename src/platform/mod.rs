@@ -33,6 +33,13 @@ pub trait WindowManager {
     /// Get information about the currently active/focused window
     fn get_active_window(&self) -> Result<WindowInfo>;
 
+    /// Get the previously active window (before the current one)
+    /// This is useful when Cursor is frontmost and we want to know what app the user was in before
+    fn get_previous_window(&self) -> Result<WindowInfo> {
+        // Default implementation: just return active window (platforms should override)
+        self.get_active_window()
+    }
+
     /// Focus/activate a specific window
     fn focus_window(&self, window: &WindowInfo) -> Result<()>;
 
@@ -49,11 +56,26 @@ pub trait WindowManager {
     fn is_cursor_window(&self, window: &WindowInfo) -> bool {
         window.is_cursor()
     }
+    
+    /// Pause YouTube if playing in the given window (returns true if paused)
+    fn pause_youtube_if_playing(&self, _window_title: &str) -> bool {
+        false // Default: no-op
+    }
+    
+    /// Resume YouTube in the given window (returns true if resumed)
+    fn resume_youtube(&self, _window_title: &str) -> bool {
+        false // Default: no-op
+    }
+    
+    /// Update menu bar status indicator
+    fn update_menu_bar_status(&self, _status: &str, _window_title: Option<&str>) {
+        // Default: no-op
+    }
 }
 
 // Platform-specific implementations
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacOSWindowManager as PlatformWindowManager;
 

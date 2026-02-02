@@ -8,6 +8,9 @@ REPO="adityasingh2400/Recursor"
 INSTALL_DIR="$HOME/.cursor/bin"
 HOOKS_FILE="$HOME/.cursor/hooks.json"
 BINARY_NAME="recursor"
+MENUBAR_NAME="recursor-menubar"
+LAUNCHAGENT_DIR="$HOME/Library/LaunchAgents"
+LAUNCHAGENT_PLIST="com.recursor.menubar.plist"
 
 # Colors
 RED='\033[0;31m'
@@ -48,6 +51,7 @@ get_download_url() {
         windows) BINARY_FILE="recursor-windows-${ARCH}.exe" ;;
     esac
     DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_FILE}"
+    MENUBAR_URL="https://github.com/${REPO}/releases/latest/download/recursor-menubar"
 }
 
 # Download binary
@@ -101,9 +105,94 @@ build_from_source() {
     cp "target/release/$BINARY_NAME" "$DEST" 2>/dev/null || cp "target/release/${BINARY_NAME}.exe" "$DEST"
     chmod +x "$DEST"
     
+    # Build menu bar app on macOS
+    if [ "$OS" = "macos" ]; then
+        build_menubar_app "$TEMP_DIR/recursor"
+    fi
+    
     cd "$HOME"
     rm -rf "$TEMP_DIR"
     success "Built and installed to $DEST"
+}
+
+# Build menu bar app (macOS only)
+build_menubar_app() {
+    SRC_DIR="$1"
+    info "Building menu bar app..."
+    
+    MENUBAR_SRC="$SRC_DIR/menubar/RecursorMenuBar.swift"
+    MENUBAR_DEST="$INSTALL_DIR/$MENUBAR_NAME"
+    
+    if [ -f "$MENUBAR_SRC" ]; then
+        swiftc -O -o "$MENUBAR_DEST" "$MENUBAR_SRC" 2>/dev/null || {
+            warn "Could not compile menu bar app (Swift not available)"
+            return
+        }
+        chmod +x "$MENUBAR_DEST"
+        success "Menu bar app built"
+    fi
+}
+
+# Install menu bar app (macOS only)
+install_menubar() {
+    [ "$OS" != "macos" ] && return
+    
+    info "Setting up menu bar status indicator..."
+    
+    # Try to download pre-built menu bar app
+    MENUBAR_DEST="$INSTALL_DIR/$MENUBAR_NAME"
+    if [ ! -f "$MENUBAR_DEST" ]; then
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$MENUBAR_URL" -o "$MENUBAR_DEST" 2>/dev/null || true
+        fi
+    fi
+    
+    # If still no binary, try to compile from source
+    if [ ! -f "$MENUBAR_DEST" ]; then
+        MENUBAR_SWIFT_URL="https://raw.githubusercontent.com/${REPO}/main/menubar/RecursorMenuBar.swift"
+        TEMP_SWIFT=$(mktemp)
+        if curl -fsSL "$MENUBAR_SWIFT_URL" -o "$TEMP_SWIFT" 2>/dev/null; then
+            swiftc -O -o "$MENUBAR_DEST" "$TEMP_SWIFT" 2>/dev/null || {
+                warn "Could not compile menu bar app"
+                rm -f "$TEMP_SWIFT"
+                return
+            }
+            rm -f "$TEMP_SWIFT"
+        fi
+    fi
+    
+    if [ -f "$MENUBAR_DEST" ]; then
+        chmod +x "$MENUBAR_DEST"
+        
+        # Create LaunchAgent
+        mkdir -p "$LAUNCHAGENT_DIR"
+        cat > "$LAUNCHAGENT_DIR/$LAUNCHAGENT_PLIST" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.recursor.menubar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$MENUBAR_DEST</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+        
+        # Load the launch agent
+        launchctl unload "$LAUNCHAGENT_DIR/$LAUNCHAGENT_PLIST" 2>/dev/null || true
+        launchctl load "$LAUNCHAGENT_DIR/$LAUNCHAGENT_PLIST" 2>/dev/null || true
+        
+        success "Menu bar app installed and started"
+    else
+        warn "Menu bar app not available (optional feature)"
+    fi
 }
 
 # Configure hooks
@@ -132,6 +221,12 @@ configure_hooks() {
     "beforeSubmitPrompt": [
       { "command": "$RECURSOR_CMD save" }
     ],
+    "beforeShellExecution": [
+      { "command": "$RECURSOR_CMD before-shell" }
+    ],
+    "afterShellExecution": [
+      { "command": "$RECURSOR_CMD after-shell" }
+    ],
     "stop": [
       { "command": "$RECURSOR_CMD restore" }
     ]
@@ -141,12 +236,18 @@ EOF
     success "Created $HOOKS_FILE"
 }
 
-# macOS permissions
+# macOS permissions and Chrome setup
 setup_permissions() {
     [ "$OS" != "macos" ] && return
     
     info "Checking macOS permissions..."
     "$INSTALL_DIR/$BINARY_NAME" permissions 2>/dev/null || true
+    
+    # Check if Chrome JavaScript from Apple Events is enabled
+    echo ""
+    info "For YouTube auto-pause/resume, enable in Chrome:"
+    echo "    View > Developer > Allow JavaScript from Apple Events"
+    echo ""
 }
 
 # Success message
@@ -161,7 +262,15 @@ print_success() {
     echo "  Then just use Cursor normally - Recursor"
     echo "  handles everything automatically!"
     echo ""
-    [ "$OS" = "macos" ] && echo "  Note: Grant Accessibility permission if prompted."
+    if [ "$OS" = "macos" ]; then
+        echo "  Features:"
+        echo "    ✓ Auto-switch back to your previous app"
+        echo "    ✓ Auto-return to Cursor when AI finishes"
+        echo "    ✓ Menu bar status indicator"
+        echo "    ✓ YouTube auto-pause/resume (enable in Chrome)"
+        echo ""
+        echo "  Note: Grant Accessibility permission if prompted."
+    fi
     echo ""
 }
 
@@ -181,6 +290,7 @@ main() {
     get_download_url
     download_binary
     configure_hooks
+    install_menubar
     setup_permissions
     print_success
 }

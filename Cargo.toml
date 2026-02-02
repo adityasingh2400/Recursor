@@ -26,6 +26,13 @@ thiserror = "1.0"
 # Home directory detection
 dirs = "5.0"
 
+# SQLite for reading Cursor's allowlist
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Unix process checking (macOS/Linux)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Windows dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.52", features = [

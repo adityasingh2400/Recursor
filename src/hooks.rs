@@ -73,6 +73,29 @@ impl BeforeSubmitPromptOutput {
     }
 }
 
+/// Input for afterShellExecution hook
+#[derive(Debug, Deserialize)]
+pub struct AfterShellInput {
+    #[serde(flatten)]
+    pub common: HookInput,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub duration: Option<f64>,
+}
+
+/// Input for beforeShellExecution hook
+#[derive(Debug, Deserialize)]
+pub struct BeforeShellInput {
+    #[serde(flatten)]
+    pub common: HookInput,
+    /// The command about to be executed
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
 /// Input for stop hook
 #[derive(Debug, Deserialize)]
 pub struct StopInput {

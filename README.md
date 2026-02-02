@@ -29,12 +29,78 @@ Then restart Cursor. Done.
 
 ## What It Does
 
-1. You're browsing YouTube
+Recursor intelligently manages your focus while Cursor AI agents work:
+
+### Smart Window Switching
+1. You're watching YouTube (or doing anything else)
 2. You switch to Cursor and submit a prompt
 3. **Recursor sends you back to YouTube** while the AI works
-4. **Cursor pops back up** when the AI is done
+4. **Cursor pops back up only when needed:**
+   - When the agent needs your permission to run a command
+   - When the agent finishes working
 
-No more staring at loading screens.
+### YouTube Auto Pause/Play
+When you're watching YouTube and the agent needs your attention:
+- **Video automatically pauses** when you're brought to Cursor
+- **Video automatically resumes** when you're sent back
+
+### Command Allowlist Integration
+Recursor reads your Cursor command allowlist:
+- **Allowlisted commands** run silently — you stay on YouTube
+- **Non-allowlisted commands** bring you to Cursor for approval, then send you back
+
+No more staring at loading screens. No more missing important agent prompts.
+
+---
+
+## How It Works
+
+Recursor uses Cursor's hooks system to intercept key events:
+
+| Hook | What Recursor Does |
+|------|-------------------|
+| `beforeSubmitPrompt` | Saves your current window, sends you back to it |
+| `beforeShellExecution` | If command needs approval: pauses YouTube, brings you to Cursor |
+| `afterShellExecution` | Sends you back to your window, resumes YouTube |
+| `stop` | Brings you back to Cursor when agent finishes |
+
+---
+
+## Setup Instructions
+
+### After Installation
+
+The installer automatically sets up the hooks in `~/.cursor/hooks.json`. If you need to manually configure them, create this file:
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      { "command": "/Users/YOUR_USERNAME/.cursor/bin/recursor save" }
+    ],
+    "beforeShellExecution": [
+      { "command": "/Users/YOUR_USERNAME/.cursor/bin/recursor before-shell" }
+    ],
+    "afterShellExecution": [
+      { "command": "/Users/YOUR_USERNAME/.cursor/bin/recursor after-shell" }
+    ],
+    "stop": [
+      { "command": "/Users/YOUR_USERNAME/.cursor/bin/recursor restore" }
+    ]
+  }
+}
+```
+
+Replace `YOUR_USERNAME` with your actual username (run `whoami` to find it).
+
+### macOS Permissions
+
+On first run, macOS will ask for Accessibility permissions. Grant them:
+
+1. System Preferences → Privacy & Security → Accessibility
+2. Enable **Terminal** (or **Cursor** if running from there)
+3. Run `recursor permissions` to verify
 
 ---
 
@@ -81,6 +147,12 @@ System Preferences → Privacy & Security → Accessibility → Enable Terminal 
 
 **Cursor not coming back?**  
 Run `recursor status` to check if it's saving correctly
+
+**YouTube not pausing/resuming?**  
+Make sure Chrome is the browser you're using. Safari support coming soon.
+
+**Commands running without bringing you to Cursor?**  
+The command is probably in your allowlist. Check Cursor settings → Agent → Command Allowlist.
 
 ---
 

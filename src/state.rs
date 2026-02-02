@@ -172,10 +172,15 @@ impl StateManager {
             return Ok(false);
         }
 
-        // If current window is different from saved AND not Cursor,
-        // the user has switched apps
-        if current_window != &conv_state.saved_window && !current_window.is_cursor() {
-            return Ok(false);
+        // If user is in Cursor already, no need to restore
+        if current_window.is_cursor() {
+            return Ok(true); // Still restore (re-focus) to make sure correct window is front
+        }
+
+        // If user is still in the app we sent them to, restore to Cursor
+        // If user manually switched to a DIFFERENT app, don't interrupt them
+        if current_window.app_name != conv_state.saved_window.app_name {
+            return Ok(false); // User switched to a different app, don't interrupt
         }
 
         Ok(true)

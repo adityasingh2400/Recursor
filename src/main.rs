@@ -48,6 +48,12 @@ enum Commands {
     /// Restore focus to Cursor (if appropriate based on intelligent refocus logic)
     Restore,
 
+    /// Called before shell execution (always allow; no focus change)
+    BeforeShell,
+
+    /// Called after shell execution - switch back to video and resume
+    AfterShell,
+
     /// Show current saved state
     Status,
 
@@ -71,6 +77,8 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::Save { no_focus } => cmd_save(no_focus),
         Commands::Restore => cmd_restore(),
+        Commands::BeforeShell => cmd_before_shell(),
+        Commands::AfterShell => cmd_after_shell(),
         Commands::Status => cmd_status(),
         Commands::Permissions => cmd_permissions(),
         Commands::Clear => cmd_clear(),
@@ -78,7 +86,7 @@ fn run() -> Result<()> {
 }
 
 /// Save command - called by beforeSubmitPrompt hook
-fn cmd_save(no_focus: bool) -> Result<()> {
+fn cmd_save(_no_focus: bool) -> Result<()> {
     let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
 
@@ -94,55 +102,35 @@ fn cmd_save(no_focus: bool) -> Result<()> {
     // Get the current active window (this is Cursor, since user just submitted prompt)
     let cursor_window = wm.get_active_window().ok();
 
-    // If the active window is not Cursor, something is off - but save it anyway
-    // The user might have a different setup
-    
-    // We need to get the PREVIOUS window (before Cursor got focus)
-    // Unfortunately, we can't easily get this. The workaround is:
-    // 1. Save the current Cursor window info
-    // 2. After a brief delay, the user will have switched back to their previous app
-    //    OR we focus back to it
-    
-    // For now, if Cursor is active, we'll save Cursor's info and return
-    // The actual "previous window" logic happens via the focus_window call
-    
-    if let Some(ref cw) = cursor_window {
-        if wm.is_cursor_window(cw) {
-            // Cursor is active - this is expected
-            // We need to save state and then switch to previous app
-            
-            // Small delay to let the prompt be processed
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            
-            // Try to get the window that will be focused after we switch away
-            // This is tricky - we'll save Cursor's window and handle restore properly
-            
-            // For the "previous window", we'll need to switch focus and then capture it
-            // OR we can use platform-specific APIs to get the window list
-            
-            // Simpler approach: just save Cursor window, and on restore, focus THIS specific window
-            state_mgr.save_conversation(&conversation_id, cw.clone(), cursor_window.clone())?;
-            
-            // Output success response for the hook
-            hooks::write_output(&hooks::BeforeSubmitPromptOutput::allow())?;
-            return Ok(());
-        }
+    // Get the previous app the user was using (before they switched to Cursor)
+    let previous_window = wm.get_previous_window().ok();
+
+    // Save state: we need to remember the Cursor window to come back to
+    let window_to_save = if let Some(ref cw) = cursor_window {
+        let w = previous_window.clone().unwrap_or_else(|| cw.clone());
+        state_mgr.save_conversation(&conversation_id, w.clone(), cursor_window.clone())?;
+        Some(w)
+    } else {
+        None
+    };
+
+    // Update menu bar status
+    if let Some(ref w) = window_to_save {
+        wm.update_menu_bar_status("working", Some(&w.title));
     }
 
-    // If we get here, the active window is NOT Cursor (user submitted from elsewhere?)
-    // Save it as the window to return to
-    let active_window = wm
-        .get_active_window()
-        .context("Failed to get active window")?;
-
-    // Save the window state with conversation_id
-    state_mgr.save_conversation(&conversation_id, active_window.clone(), cursor_window)?;
-
-    // Optionally switch focus back to the saved window
-    if !no_focus {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if let Err(e) = wm.focus_window(&active_window) {
-            eprintln!("Warning: Could not focus saved window: {}", e);
+    // Switch focus back to the previous app (so user can continue what they were doing)
+    if let Some(ref prev) = previous_window {
+        // Small delay to let the prompt submission complete
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        
+        // Focus the previous window first
+        let _ = wm.focus_window(prev);
+        
+        // If it's Chrome, try to resume any YouTube video
+        if prev.app_name == "Google Chrome" {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            wm.resume_youtube(&prev.title);
         }
     }
 
@@ -166,21 +154,26 @@ fn cmd_restore() -> Result<()> {
         .and_then(|i| i.common.conversation_id.clone())
         .unwrap_or_else(|| "default".to_string());
 
-    // Get current active window to check if user switched apps
+    // Get the saved state to check what window user was in
+    let conv_state = state_mgr.load_conversation(&conversation_id)?;
+    
+    // Get current active window to check if user is already in Cursor
     let current_window = wm.get_active_window().ok();
+    let already_in_cursor = current_window
+        .as_ref()
+        .map(|w| w.is_cursor())
+        .unwrap_or(false);
 
-    // Check if we should restore focus to Cursor
-    let should_restore = if let Some(ref current) = current_window {
-        state_mgr.should_restore_cursor(&conversation_id, current)?
-    } else {
-        true // If we can't get current window, try to restore anyway
-    };
+    // Pause YouTube if user is in Chrome (before switching to Cursor)
+    if let Some(ref current) = current_window {
+        if current.app_name == "Google Chrome" {
+            wm.pause_youtube_if_playing(&current.title);
+        }
+    }
 
-    if should_restore {
-        // Try to focus the specific Cursor window that triggered this conversation
-        let conv_state = state_mgr.load_conversation(&conversation_id)?;
-        
-        if let Some(state) = conv_state {
+    // If user is NOT in Cursor, bring them back
+    if !already_in_cursor {
+        if let Some(ref state) = conv_state {
             if let Some(ref cursor_win) = state.cursor_window {
                 // Focus the specific Cursor window
                 if wm.focus_cursor_window(cursor_win).is_err() {
@@ -197,11 +190,138 @@ fn cmd_restore() -> Result<()> {
         }
     }
 
+    // Update menu bar status
+    wm.update_menu_bar_status("idle", None);
+
     // Clear the saved state for this conversation
     state_mgr.clear_conversation(&conversation_id)?;
 
     // Output response for the hook
     hooks::write_output(&hooks::StopOutput::empty())?;
+
+    Ok(())
+}
+
+/// BeforeShell command - called before every shell execution.
+/// We check if the command is in the user's allowlist:
+/// - If YES (auto-approved): do nothing, let it run silently
+/// - If NO (needs approval): save current window, bring user back to Cursor and pause YouTube
+///   afterShellExecution will switch them back when the command completes
+fn cmd_before_shell() -> Result<()> {
+    let wm = create_window_manager();
+    let state_mgr = StateManager::new()?;
+
+    // Read hook input to get the command
+    let input: Option<hooks::BeforeShellInput> = hooks::try_read_input();
+    let command = input
+        .as_ref()
+        .and_then(|i| i.command.clone())
+        .unwrap_or_default();
+    
+    let conversation_id = input
+        .as_ref()
+        .and_then(|i| i.common.conversation_id.clone())
+        .unwrap_or_else(|| "default".to_string());
+
+    // Read the allowlist from Cursor's database
+    let allowlist = platform::macos::read_cursor_allowlist().unwrap_or_default();
+    
+    // Check if this command is auto-approved
+    let is_allowed = platform::macos::is_command_allowed(&command, &allowlist);
+    
+    if !is_allowed {
+        // Command needs approval - save current window, then bring user back to Cursor
+        
+        // Get current window (this is where the user is - e.g., Chrome/YouTube)
+        let current_window = wm.get_active_window().ok();
+        
+        // Save this window so afterShellExecution can return to it
+        if let Some(ref current) = current_window {
+            // Only save if user is NOT already in Cursor
+            if !current.is_cursor() {
+                // Use a special key for shell-triggered saves
+                let shell_conv_id = format!("{}_shell", conversation_id);
+                state_mgr.save_conversation(&shell_conv_id, current.clone(), None)?;
+                
+                // Pause YouTube if user is watching
+                if current.app_name == "Google Chrome" {
+                    wm.pause_youtube_if_playing(&current.title);
+                }
+            }
+        }
+        
+        // Bring user back to Cursor
+        // First try to use the original conversation's Cursor window
+        if let Some(state) = state_mgr.load_conversation(&conversation_id)? {
+            if let Some(ref cursor_win) = state.cursor_window {
+                let _ = wm.focus_cursor_window(cursor_win);
+            } else {
+                let _ = wm.focus_cursor();
+            }
+        } else {
+            let _ = wm.focus_cursor();
+        }
+        
+        // Update menu bar status
+        wm.update_menu_bar_status("approval_needed", Some(&command));
+    }
+    // If allowed, do nothing - let the command run while user watches their video
+
+    // Always allow the command to proceed
+    let output = serde_json::json!({ "permission": "allow" });
+    println!("{}", output);
+    Ok(())
+}
+
+/// AfterShell command - called after a shell command has run.
+/// Switch user back to the saved window (e.g. YouTube) and resume.
+fn cmd_after_shell() -> Result<()> {
+    let wm = create_window_manager();
+    let state_mgr = StateManager::new()?;
+
+    // Read raw stdin and parse
+    use std::io::{self, BufRead};
+    let stdin = io::stdin();
+    let mut raw_input = String::new();
+    for line in stdin.lock().lines() {
+        if let Ok(l) = line {
+            raw_input.push_str(&l);
+            raw_input.push('\n');
+        }
+    }
+    
+    let input: Option<hooks::AfterShellInput> = serde_json::from_str(&raw_input).ok();
+    
+    let conversation_id = input
+        .as_ref()
+        .and_then(|i| i.common.conversation_id.clone())
+        .unwrap_or_else(|| "default".to_string());
+
+    // Check for shell-specific saved state first
+    let shell_conv_id = format!("{}_shell", conversation_id);
+    
+    if let Some(state) = state_mgr.load_conversation(&shell_conv_id)? {
+        // We have a shell-specific save - this means beforeShellExecution brought user to Cursor
+        let prev = &state.saved_window;
+        
+        // Switch back to the saved window
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let _ = wm.focus_window(prev);
+        
+        // Resume YouTube if it was Chrome
+        if prev.app_name == "Google Chrome" {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            wm.resume_youtube(&prev.title);
+        }
+        
+        // Clear the shell-specific state
+        state_mgr.clear_conversation(&shell_conv_id)?;
+        
+        // Update menu bar
+        wm.update_menu_bar_status("working", Some(&prev.title));
+    }
+    // If no shell-specific state, the command was auto-approved and user stayed on their video
+    // Nothing to do
 
     Ok(())
 }
