@@ -3,50 +3,63 @@
 //! Handles saving and loading the window state between save and restore operations.
 //! Implements "intelligent refocus" logic to avoid forcing users back to windows
 //! they've manually switched away from.
+//!
+//! Uses conversation_id to track state per Cursor window, so multiple Cursor
+//! windows can each restore to the correct window.
 
 use crate::platform::WindowInfo;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// State file format
+/// State for a single conversation/window
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecursorState {
+pub struct ConversationState {
     /// The window that was active when the user submitted a prompt
     pub saved_window: WindowInfo,
+    /// The Cursor window that triggered this save (so we can restore to it)
+    #[serde(default)]
+    pub cursor_window: Option<WindowInfo>,
     /// When the window was saved
     pub saved_at: DateTime<Utc>,
-    /// Last time we checked if the user switched apps
-    #[serde(default)]
-    pub last_active_check: Option<DateTime<Utc>>,
     /// Whether the user has manually switched to a different app
     #[serde(default)]
     pub user_switched: bool,
 }
 
-impl RecursorState {
-    /// Create a new state with the given window
-    pub fn new(window: WindowInfo) -> Self {
+impl ConversationState {
+    /// Create a new state with the given windows
+    pub fn new(saved_window: WindowInfo, cursor_window: Option<WindowInfo>) -> Self {
         Self {
-            saved_window: window,
+            saved_window,
+            cursor_window,
             saved_at: Utc::now(),
-            last_active_check: None,
             user_switched: false,
         }
-    }
-
-    /// Mark that the user has switched to a different app
-    pub fn mark_user_switched(&mut self) {
-        self.user_switched = true;
-        self.last_active_check = Some(Utc::now());
     }
 
     /// Check if this state is stale (older than 1 hour)
     pub fn is_stale(&self) -> bool {
         let age = Utc::now() - self.saved_at;
         age.num_hours() >= 1
+    }
+}
+
+/// Full state file format - maps conversation_id to state
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RecursorState {
+    /// Map of conversation_id -> state
+    #[serde(default)]
+    pub conversations: HashMap<String, ConversationState>,
+}
+
+impl RecursorState {
+    /// Clean up stale entries
+    pub fn cleanup_stale(&mut self) {
+        self.conversations.retain(|_, state| !state.is_stale());
     }
 }
 
@@ -75,37 +88,61 @@ impl StateManager {
         Ok(cursor_dir.join("recursor_state.json"))
     }
 
-    /// Save the current window state
-    pub fn save(&self, state: &RecursorState) -> Result<()> {
-        let json = serde_json::to_string_pretty(state).context("Failed to serialize state")?;
-
-        fs::write(&self.state_path, json).context("Failed to write state file")?;
-
-        Ok(())
-    }
-
-    /// Load the saved window state
-    pub fn load(&self) -> Result<Option<RecursorState>> {
+    /// Load the full state
+    fn load_full(&self) -> Result<RecursorState> {
         if !self.state_path.exists() {
-            return Ok(None);
+            return Ok(RecursorState::default());
         }
 
         let json = fs::read_to_string(&self.state_path).context("Failed to read state file")?;
 
-        let state: RecursorState =
-            serde_json::from_str(&json).context("Failed to parse state file")?;
+        let mut state: RecursorState =
+            serde_json::from_str(&json).unwrap_or_default();
+        
+        // Clean up stale entries
+        state.cleanup_stale();
 
-        // Check if state is stale
-        if state.is_stale() {
-            // Remove stale state file
-            let _ = fs::remove_file(&self.state_path);
-            return Ok(None);
-        }
-
-        Ok(Some(state))
+        Ok(state)
     }
 
-    /// Clear the saved state
+    /// Save the full state
+    fn save_full(&self, state: &RecursorState) -> Result<()> {
+        let json = serde_json::to_string_pretty(state).context("Failed to serialize state")?;
+        fs::write(&self.state_path, json).context("Failed to write state file")?;
+        Ok(())
+    }
+
+    /// Save state for a specific conversation
+    pub fn save_conversation(
+        &self,
+        conversation_id: &str,
+        saved_window: WindowInfo,
+        cursor_window: Option<WindowInfo>,
+    ) -> Result<()> {
+        let mut state = self.load_full()?;
+        
+        let conv_state = ConversationState::new(saved_window, cursor_window);
+        state.conversations.insert(conversation_id.to_string(), conv_state);
+        
+        self.save_full(&state)?;
+        Ok(())
+    }
+
+    /// Load state for a specific conversation
+    pub fn load_conversation(&self, conversation_id: &str) -> Result<Option<ConversationState>> {
+        let state = self.load_full()?;
+        Ok(state.conversations.get(conversation_id).cloned())
+    }
+
+    /// Clear state for a specific conversation
+    pub fn clear_conversation(&self, conversation_id: &str) -> Result<()> {
+        let mut state = self.load_full()?;
+        state.conversations.remove(conversation_id);
+        self.save_full(&state)?;
+        Ok(())
+    }
+
+    /// Clear all saved state
     pub fn clear(&self) -> Result<()> {
         if self.state_path.exists() {
             fs::remove_file(&self.state_path).context("Failed to remove state file")?;
@@ -113,33 +150,31 @@ impl StateManager {
         Ok(())
     }
 
-    /// Update the state to mark that the user switched apps
-    pub fn mark_user_switched(&self) -> Result<()> {
-        if let Some(mut state) = self.load()? {
-            state.mark_user_switched();
-            self.save(&state)?;
-        }
-        Ok(())
+    /// Get all conversations (for status display)
+    pub fn get_all_conversations(&self) -> Result<HashMap<String, ConversationState>> {
+        let state = self.load_full()?;
+        Ok(state.conversations)
     }
 
-    /// Check if we should restore focus to Cursor
-    ///
-    /// Returns false if the user has manually switched to a different app
-    /// while the agent was working.
-    pub fn should_restore_cursor(&self, current_window: &WindowInfo) -> Result<bool> {
-        let state = match self.load()? {
+    /// Check if we should restore focus to Cursor for a conversation
+    pub fn should_restore_cursor(
+        &self,
+        conversation_id: &str,
+        current_window: &WindowInfo,
+    ) -> Result<bool> {
+        let conv_state = match self.load_conversation(conversation_id)? {
             Some(s) => s,
             None => return Ok(true), // No saved state, always restore
         };
 
         // If user explicitly switched apps, don't force them back
-        if state.user_switched {
+        if conv_state.user_switched {
             return Ok(false);
         }
 
         // If current window is different from saved AND not Cursor,
         // the user has switched apps
-        if current_window != &state.saved_window && !current_window.is_cursor() {
+        if current_window != &conv_state.saved_window && !current_window.is_cursor() {
             return Ok(false);
         }
 
@@ -166,23 +201,7 @@ mod tests {
             title: "Test Window".to_string(),
         };
 
-        let state = RecursorState::new(window);
+        let state = ConversationState::new(window, None);
         assert!(!state.is_stale());
-    }
-
-    #[test]
-    fn test_user_switched() {
-        let window = WindowInfo {
-            pid: 1234,
-            window_id: "test".to_string(),
-            app_name: "Test".to_string(),
-            title: "Test Window".to_string(),
-        };
-
-        let mut state = RecursorState::new(window);
-        assert!(!state.user_switched);
-
-        state.mark_user_switched();
-        assert!(state.user_switched);
     }
 }

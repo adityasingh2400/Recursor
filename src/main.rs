@@ -25,7 +25,7 @@ mod state;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use platform::{create_window_manager, WindowManager};
-use state::{RecursorState, StateManager};
+use state::StateManager;
 
 /// Recursor - The "Bounce Back" Utility for Cursor AI Agents
 #[derive(Parser)]
@@ -83,32 +83,64 @@ fn cmd_save(no_focus: bool) -> Result<()> {
     let state_mgr = StateManager::new()?;
 
     // Read hook input from stdin (if available)
-    let _input: Option<hooks::BeforeSubmitPromptInput> = hooks::try_read_input();
+    let input: Option<hooks::BeforeSubmitPromptInput> = hooks::try_read_input();
+    
+    // Get conversation_id from hook input, or use a default
+    let conversation_id = input
+        .as_ref()
+        .and_then(|i| i.common.conversation_id.clone())
+        .unwrap_or_else(|| "default".to_string());
 
-    // Get the current active window
+    // Get the current active window (this is Cursor, since user just submitted prompt)
+    let cursor_window = wm.get_active_window().ok();
+
+    // If the active window is not Cursor, something is off - but save it anyway
+    // The user might have a different setup
+    
+    // We need to get the PREVIOUS window (before Cursor got focus)
+    // Unfortunately, we can't easily get this. The workaround is:
+    // 1. Save the current Cursor window info
+    // 2. After a brief delay, the user will have switched back to their previous app
+    //    OR we focus back to it
+    
+    // For now, if Cursor is active, we'll save Cursor's info and return
+    // The actual "previous window" logic happens via the focus_window call
+    
+    if let Some(ref cw) = cursor_window {
+        if wm.is_cursor_window(cw) {
+            // Cursor is active - this is expected
+            // We need to save state and then switch to previous app
+            
+            // Small delay to let the prompt be processed
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            
+            // Try to get the window that will be focused after we switch away
+            // This is tricky - we'll save Cursor's window and handle restore properly
+            
+            // For the "previous window", we'll need to switch focus and then capture it
+            // OR we can use platform-specific APIs to get the window list
+            
+            // Simpler approach: just save Cursor window, and on restore, focus THIS specific window
+            state_mgr.save_conversation(&conversation_id, cw.clone(), cursor_window.clone())?;
+            
+            // Output success response for the hook
+            hooks::write_output(&hooks::BeforeSubmitPromptOutput::allow())?;
+            return Ok(());
+        }
+    }
+
+    // If we get here, the active window is NOT Cursor (user submitted from elsewhere?)
+    // Save it as the window to return to
     let active_window = wm
         .get_active_window()
         .context("Failed to get active window")?;
 
-    // If the active window is Cursor, we don't need to save anything special
-    // The user is already in Cursor
-    if wm.is_cursor_window(&active_window) {
-        // Output success response for the hook
-        hooks::write_output(&hooks::BeforeSubmitPromptOutput::allow())?;
-        return Ok(());
-    }
-
-    // Save the window state
-    let state = RecursorState::new(active_window.clone());
-    state_mgr.save(&state)?;
+    // Save the window state with conversation_id
+    state_mgr.save_conversation(&conversation_id, active_window.clone(), cursor_window)?;
 
     // Optionally switch focus back to the saved window
-    // (This allows the user to continue what they were doing while the agent works)
     if !no_focus {
-        // Small delay to let Cursor process the prompt
         std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Focus back to the saved window
         if let Err(e) = wm.focus_window(&active_window) {
             eprintln!("Warning: Could not focus saved window: {}", e);
         }
@@ -126,27 +158,47 @@ fn cmd_restore() -> Result<()> {
     let state_mgr = StateManager::new()?;
 
     // Read hook input from stdin (if available)
-    let _input: Option<hooks::StopInput> = hooks::try_read_input();
+    let input: Option<hooks::StopInput> = hooks::try_read_input();
+    
+    // Get conversation_id from hook input
+    let conversation_id = input
+        .as_ref()
+        .and_then(|i| i.common.conversation_id.clone())
+        .unwrap_or_else(|| "default".to_string());
 
     // Get current active window to check if user switched apps
     let current_window = wm.get_active_window().ok();
 
     // Check if we should restore focus to Cursor
     let should_restore = if let Some(ref current) = current_window {
-        state_mgr.should_restore_cursor(current)?
+        state_mgr.should_restore_cursor(&conversation_id, current)?
     } else {
         true // If we can't get current window, try to restore anyway
     };
 
     if should_restore {
-        // Bring Cursor to the foreground
-        if let Err(e) = wm.focus_cursor() {
-            eprintln!("Warning: Could not focus Cursor: {}", e);
+        // Try to focus the specific Cursor window that triggered this conversation
+        let conv_state = state_mgr.load_conversation(&conversation_id)?;
+        
+        if let Some(state) = conv_state {
+            if let Some(ref cursor_win) = state.cursor_window {
+                // Focus the specific Cursor window
+                if wm.focus_cursor_window(cursor_win).is_err() {
+                    // Fallback to generic Cursor focus
+                    let _ = wm.focus_cursor();
+                }
+            } else {
+                // No specific window saved, use generic focus
+                let _ = wm.focus_cursor();
+            }
+        } else {
+            // No state found, just focus Cursor
+            let _ = wm.focus_cursor();
         }
     }
 
-    // Clear the saved state
-    state_mgr.clear()?;
+    // Clear the saved state for this conversation
+    state_mgr.clear_conversation(&conversation_id)?;
 
     // Output response for the hook
     hooks::write_output(&hooks::StopOutput::empty())?;
@@ -158,20 +210,29 @@ fn cmd_restore() -> Result<()> {
 fn cmd_status() -> Result<()> {
     let state_mgr = StateManager::new()?;
 
-    match state_mgr.load()? {
-        Some(state) => {
-            println!("Reflex State:");
-            println!("  Saved Window:");
-            println!("    App: {}", state.saved_window.app_name);
-            println!("    Title: {}", state.saved_window.title);
-            println!("    PID: {}", state.saved_window.pid);
-            println!("    Window ID: {}", state.saved_window.window_id);
-            println!("  Saved At: {}", state.saved_at);
-            println!("  User Switched: {}", state.user_switched);
+    let conversations = state_mgr.get_all_conversations()?;
+    
+    if conversations.is_empty() {
+        println!("No saved state.");
+        return Ok(());
+    }
+
+    println!("Recursor State:");
+    println!("===============");
+    
+    for (conv_id, state) in conversations {
+        println!("\nConversation: {}", conv_id);
+        println!("  Saved Window:");
+        println!("    App: {}", state.saved_window.app_name);
+        println!("    Title: {}", state.saved_window.title);
+        println!("    PID: {}", state.saved_window.pid);
+        if let Some(ref cursor_win) = state.cursor_window {
+            println!("  Cursor Window:");
+            println!("    Title: {}", cursor_win.title);
+            println!("    PID: {}", cursor_win.pid);
         }
-        None => {
-            println!("No saved state.");
-        }
+        println!("  Saved At: {}", state.saved_at);
+        println!("  User Switched: {}", state.user_switched);
     }
 
     Ok(())
@@ -182,7 +243,7 @@ fn cmd_permissions() -> Result<()> {
     let wm = create_window_manager();
 
     println!("Recursor Permissions Check");
-    println!("========================");
+    println!("==========================");
     println!();
 
     // Try to get the active window

@@ -36,8 +36,14 @@ pub trait WindowManager {
     /// Focus/activate a specific window
     fn focus_window(&self, window: &WindowInfo) -> Result<()>;
 
-    /// Focus the Cursor application window
+    /// Focus the Cursor application window (any window)
     fn focus_cursor(&self) -> Result<()>;
+
+    /// Focus a specific Cursor window (by title/id)
+    fn focus_cursor_window(&self, window: &WindowInfo) -> Result<()> {
+        // Default implementation: try focus_window, fallback to focus_cursor
+        self.focus_window(window).or_else(|_| self.focus_cursor())
+    }
 
     /// Check if a window belongs to Cursor
     fn is_cursor_window(&self, window: &WindowInfo) -> bool {
