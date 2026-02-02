@@ -2,6 +2,8 @@
 
 **Switch back to what you were doing while Cursor works. Get pulled back when it needs you.**
 
+Written in Rust. No dependencies. Just download and run.
+
 ---
 
 ## One-Click Install
@@ -15,10 +17,7 @@ Download and double-click:
 > **macOS**: Right-click → Open (first time only)  
 > **Linux**: Right-click → Properties → Allow executing
 
----
-
-## Or Use Terminal
-
+Or use terminal:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/adityasingh2400/Recursor/main/install.sh | sh
 ```
@@ -40,40 +39,69 @@ If you're watching YouTube, Recursor pauses the video when pulling you to Cursor
 
 ---
 
-## macOS Setup (Required)
+## Setup
 
-macOS needs Accessibility permissions to switch windows. **You must enable this or Recursor won't work.**
+### macOS
 
-1. Open **System Settings** → **Privacy & Security** → **Accessibility**
-2. Click the **+** button
-3. Add **Terminal** (or whatever terminal app you use)
-4. Make sure the toggle is **ON**
+You need to enable two things:
 
-To verify it's working:
+**1. Accessibility Permission** (for window switching)
+- Open **System Settings** → **Privacy & Security** → **Accessibility**
+- Click **+** and add **Terminal** (or your terminal app)
+- Make sure the toggle is ON
+
+**2. Chrome AppleScript** (for YouTube pause/resume)
+- Open Chrome
+- Go to **View** → **Developer** → **Allow JavaScript from Apple Events**
+- Check the box
+
+Run this to verify permissions are working:
 ```bash
 recursor permissions
 ```
 
-If you see "OK" for window access, you're good.
+### Windows
+
+Nothing extra needed.
+
+### Linux
+
+Install xdotool:
+```bash
+sudo apt install xdotool
+```
 
 ---
 
-## How It Works
+## Commands
 
-Recursor hooks into Cursor's event system:
-
-| Event | What Happens |
-|-------|--------------|
-| You submit a prompt | Recursor saves your current window and sends you back to it |
-| Agent runs a command | If it needs approval, pulls you to Cursor. Otherwise runs silently. |
-| Command finishes | Sends you back to your window |
-| Agent finishes | Pulls you to Cursor to see the results |
+```bash
+recursor status       # Check current state
+recursor permissions  # Test if permissions are working (macOS)
+recursor clear        # Reset saved state
+```
 
 ---
 
-## Manual Setup
+## Troubleshooting
 
-The installer sets up `~/.cursor/hooks.json` automatically. If you need to do it manually:
+**Window switching not working on macOS?**  
+Enable Accessibility permissions. System Settings → Privacy & Security → Accessibility → Add Terminal.
+
+**YouTube not pausing/resuming?**  
+Enable AppleScript in Chrome: View → Developer → Allow JavaScript from Apple Events.
+
+**Not getting pulled back to Cursor?**  
+Run `recursor status` to check if state is being saved.
+
+**Commands running without asking for approval?**  
+That command is in your Cursor allowlist. Check Cursor settings → Agent → Command Allowlist.
+
+---
+
+## Manual Hook Setup
+
+The installer sets up hooks automatically. If you need to do it manually, create `~/.cursor/hooks.json`:
 
 ```json
 {
@@ -95,43 +123,7 @@ The installer sets up `~/.cursor/hooks.json` automatically. If you need to do it
 }
 ```
 
-Replace `YOUR_USERNAME` with your actual username (`whoami` to find it).
-
----
-
-## Requirements
-
-| Platform | What You Need |
-|----------|---------------|
-| macOS | Enable Accessibility permission (see above) |
-| Windows | Nothing extra |
-| Linux | Install xdotool: `sudo apt install xdotool` |
-
----
-
-## Commands
-
-```bash
-recursor status       # Check current state
-recursor permissions  # Test if permissions are working (macOS)
-recursor clear        # Reset saved state
-```
-
----
-
-## Troubleshooting
-
-**Window switching not working on macOS?**  
-You need to enable Accessibility permissions. System Settings → Privacy & Security → Accessibility → Add and enable Terminal.
-
-**Not getting pulled back to Cursor?**  
-Run `recursor status` to see if state is being saved properly.
-
-**YouTube not pausing/resuming?**  
-Only works with Chrome right now.
-
-**Commands running without asking for approval?**  
-That command is in your Cursor allowlist. Check Cursor settings → Agent → Command Allowlist.
+Replace `YOUR_USERNAME` with your username (`whoami` to find it).
 
 ---
 
