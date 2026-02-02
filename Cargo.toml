@@ -1,0 +1,47 @@
+[package]
+name = "recursor"
+version = "0.1.0"
+edition = "2021"
+description = "The 'Bounce Back' utility for Cursor AI Agents - automatically saves and restores window focus"
+license = "MIT"
+repository = "https://github.com/adityasingh2400/Recursor"
+keywords = ["cursor", "window-management", "productivity", "focus"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+# CLI parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Serialization for state and hooks protocol
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Home directory detection
+dirs = "5.0"
+
+# Windows dependencies
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }
+
+# Linux dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Link-time optimization
+codegen-units = 1   # Single codegen unit for better optimization
+panic = "abort"     # Abort on panic for smaller binary
+strip = true        # Strip symbols
