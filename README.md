@@ -13,10 +13,6 @@ Written in Rust. No dependencies. Just download and run.
   Switch to Cursor, submit a prompt, get sent back to what you were doing—and get pulled back only when the agent needs you.
 </p>
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/3435c638-582b-4e04-a1c9-57d8ddb46a42" controls width="100%"></video>
-</p>
-
 https://github.com/user-attachments/assets/3435c638-582b-4e04-a1c9-57d8ddb46a42
 
 ---
