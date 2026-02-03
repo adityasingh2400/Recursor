@@ -1,7 +1,6 @@
 #!/bin/bash
 # Recursor One-Click Installer for Linux
 # Double-click this file to install Recursor
-# (Make sure to right-click > Properties > Permissions > Allow executing as program)
 
 # Check if running in a terminal, if not open one
 if [ ! -t 0 ]; then
@@ -22,6 +21,22 @@ echo "  ========================================"
 echo "       Installing Recursor..."
 echo "  ========================================"
 echo ""
+
+# Auto-install xdotool if missing
+if ! command -v xdotool &> /dev/null; then
+    echo "Installing xdotool (required for window switching)..."
+    if command -v apt &> /dev/null; then
+        sudo apt update && sudo apt install -y xdotool
+    elif command -v dnf &> /dev/null; then
+        sudo dnf install -y xdotool
+    elif command -v pacman &> /dev/null; then
+        sudo pacman -S --noconfirm xdotool
+    elif command -v zypper &> /dev/null; then
+        sudo zypper install -y xdotool
+    else
+        echo "Please install xdotool manually for your distro"
+    fi
+fi
 
 # Run the installer
 curl -fsSL https://raw.githubusercontent.com/adityasingh2400/Recursor/main/install.sh | sh

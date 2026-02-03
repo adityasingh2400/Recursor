@@ -67,8 +67,25 @@ pub trait WindowManager {
         false // Default: no-op
     }
     
-    /// Update menu bar status indicator
+    /// Check if YouTube is currently playing (without pausing)
+    fn is_youtube_playing(&self) -> bool {
+        false // Default: no-op
+    }
+    
+    /// Update menu bar status indicator (simple version)
     fn update_menu_bar_status(&self, _status: &str, _window_title: Option<&str>) {
+        // Default: no-op
+    }
+    
+    /// Update menu bar status with full details
+    fn update_menu_bar_status_full(
+        &self,
+        _status: &str,
+        _cursor_state: Option<&str>,
+        _secondary_app: Option<&str>,
+        _secondary_title: Option<&str>,
+        _media_playing: Option<bool>,
+    ) {
         // Default: no-op
     }
 }

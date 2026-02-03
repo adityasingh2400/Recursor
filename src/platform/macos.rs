@@ -108,32 +108,93 @@ impl MacOSWindowManager {
         false
     }
 
-    /// Update the menu bar status
+    /// Check if YouTube is currently playing (without pausing it)
+    /// Returns true if a video is playing
+    pub fn is_youtube_playing(&self) -> bool {
+        let js_script = r#"
+            tell application "Google Chrome"
+                repeat with win in (every window)
+                    set activeTab to active tab of win
+                    set tabURL to URL of activeTab
+                    if tabURL contains "youtube.com/watch" then
+                        try
+                            set jsResult to execute activeTab javascript "
+                                (function() {
+                                    var video = document.querySelector('video');
+                                    if (video && !video.paused) {
+                                        return 'playing';
+                                    }
+                                    return 'not_playing';
+                                })();
+                            "
+                            if jsResult is "playing" then
+                                return "playing"
+                            end if
+                        end try
+                    end if
+                end repeat
+                return "not_playing"
+            end tell
+        "#;
+
+        if let Ok(result) = self.run_applescript(js_script) {
+            return result == "playing";
+        }
+        
+        false
+    }
+
+    /// Update the menu bar status with rich information
     pub fn update_menu_bar_status(&self, status: &str, window_title: Option<&str>) {
+        self.update_menu_bar_status_full(status, None, None, None, None);
+        // Also update with window title for backwards compatibility
+        if window_title.is_some() {
+            self.update_menu_bar_status_full(status, None, None, window_title, None);
+        }
+    }
+    
+    /// Update the menu bar status with full details
+    pub fn update_menu_bar_status_full(
+        &self,
+        status: &str,
+        cursor_state: Option<&str>,
+        secondary_app: Option<&str>,
+        secondary_title: Option<&str>,
+        media_playing: Option<bool>,
+    ) {
         let home = std::env::var("HOME").unwrap_or_default();
         let status_file = format!("{}/.cursor/recursor_status.json", home);
         
-        let json = if let Some(title) = window_title {
-            format!(
-                r#"{{"status":"{}","window":"{}","timestamp":{}}}"#,
-                status,
-                title.replace('"', "\\\""),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            )
-        } else {
-            format!(
-                r#"{{"status":"{}","timestamp":{}}}"#,
-                status,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0)
-            )
-        };
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         
+        // Build JSON with all available fields
+        let mut json_parts = vec![
+            format!(r#""status":"{}""#, status),
+            format!(r#""timestamp":{}"#, timestamp),
+        ];
+        
+        if let Some(cs) = cursor_state {
+            json_parts.push(format!(r#""cursor_state":"{}""#, cs.replace('"', "\\\"")));
+        }
+        
+        if let Some(app) = secondary_app {
+            json_parts.push(format!(r#""secondary_app":"{}""#, app.replace('"', "\\\"")));
+        }
+        
+        if let Some(title) = secondary_title {
+            json_parts.push(format!(r#""secondary_title":"{}""#, title.replace('"', "\\\"")));
+            // Also include "window" for backwards compatibility
+            json_parts.push(format!(r#""window":"{}""#, title.replace('"', "\\\"")));
+        }
+        
+        if let Some(playing) = media_playing {
+            json_parts.push(format!(r#""media_playing":{}"#, playing));
+        }
+        
+        let json = format!("{{{}}}", json_parts.join(","));
         let _ = std::fs::write(&status_file, json);
     }
 
@@ -531,6 +592,28 @@ impl WindowManager for MacOSWindowManager {
     
     fn update_menu_bar_status(&self, status: &str, window_title: Option<&str>) {
         MacOSWindowManager::update_menu_bar_status(self, status, window_title)
+    }
+    
+    fn is_youtube_playing(&self) -> bool {
+        MacOSWindowManager::is_youtube_playing(self)
+    }
+    
+    fn update_menu_bar_status_full(
+        &self,
+        status: &str,
+        cursor_state: Option<&str>,
+        secondary_app: Option<&str>,
+        secondary_title: Option<&str>,
+        media_playing: Option<bool>,
+    ) {
+        MacOSWindowManager::update_menu_bar_status_full(
+            self,
+            status,
+            cursor_state,
+            secondary_app,
+            secondary_title,
+            media_playing,
+        )
     }
 }
 

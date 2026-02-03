@@ -17,23 +17,22 @@ https://github.com/user-attachments/assets/8b7ac0bd-58ef-43df-8a7f-f0301f72a333
 
 ---
 
-## One-Click Install
+## Install
 
-Download and double-click:
+**One command:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/adityasingh2400/Recursor/main/install.sh | sh
+```
+
+**Or download and double-click:**
 
 | macOS | Windows | Linux |
 |:-----:|:-------:|:-----:|
 | [<img src="https://img.shields.io/badge/Download-macOS-black?style=for-the-badge&logo=apple" alt="macOS">](https://raw.githubusercontent.com/adityasingh2400/Recursor/main/installers/Install-Recursor-Mac.command) | [<img src="https://img.shields.io/badge/Download-Windows-blue?style=for-the-badge&logo=windows" alt="Windows">](https://raw.githubusercontent.com/adityasingh2400/Recursor/main/installers/Install-Recursor-Windows.bat) | [<img src="https://img.shields.io/badge/Download-Linux-orange?style=for-the-badge&logo=linux" alt="Linux">](https://raw.githubusercontent.com/adityasingh2400/Recursor/main/installers/Install-Recursor-Linux.sh) |
 
-> **macOS**: Right-click → Open (first time only)  
-> **Linux**: Right-click → Properties → Allow executing
+Then restart Cursor. That's it.
 
-Or use terminal:
-```bash
-curl -fsSL https://raw.githubusercontent.com/adityasingh2400/Recursor/main/install.sh | sh
-```
-
-Then restart Cursor.
+> **macOS**: On first use, click "Allow" when macOS asks for Accessibility permission.
 
 ---
 
@@ -50,37 +49,11 @@ If you're watching YouTube, Recursor pauses the video when pulling you to Cursor
 
 ---
 
-## Setup
+## Optional: YouTube Auto-Pause
 
-### macOS
+To have Recursor automatically pause/resume YouTube when switching windows:
 
-You need to enable two things:
-
-**1. Accessibility Permission** (for window switching)
-- Open **System Settings** → **Privacy & Security** → **Accessibility**
-- Click **+** and add **Terminal** (or your terminal app)
-- Make sure the toggle is ON
-
-**2. Chrome AppleScript** (for YouTube pause/resume)
-- Open Chrome
-- Go to **View** → **Developer** → **Allow JavaScript from Apple Events**
-- Check the box
-
-Run this to verify permissions are working:
-```bash
-recursor permissions
-```
-
-### Windows
-
-Nothing extra needed.
-
-### Linux
-
-Install xdotool:
-```bash
-sudo apt install xdotool
-```
+**macOS**: In Chrome, go to **View → Developer → Allow JavaScript from Apple Events**
 
 ---
 
@@ -97,7 +70,7 @@ recursor clear        # Reset saved state
 ## Troubleshooting
 
 **Window switching not working on macOS?**  
-Enable Accessibility permissions. System Settings → Privacy & Security → Accessibility → Add Terminal.
+Click "Allow" when macOS prompts for Accessibility permission. If you missed it: System Settings → Privacy & Security → Accessibility → enable for Terminal/Cursor.
 
 **YouTube not pausing/resuming?**  
 Enable AppleScript in Chrome: View → Developer → Allow JavaScript from Apple Events.
@@ -153,7 +126,6 @@ rm ~/.cursor/recursor_state.json
 ```bash
 git clone https://github.com/adityasingh2400/Recursor.git
 cd Recursor
-git lfs pull          # fetch demo video (optional)
 cargo build --release
 cp target/release/recursor ~/.cursor/bin/
 ```

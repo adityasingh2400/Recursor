@@ -43,6 +43,26 @@ detect_arch() {
     esac
 }
 
+# Install Linux dependencies
+install_linux_deps() {
+    [ "$OS" != "linux" ] && return
+    
+    if ! command -v xdotool >/dev/null 2>&1; then
+        info "Installing xdotool..."
+        if command -v apt >/dev/null 2>&1; then
+            sudo apt update && sudo apt install -y xdotool
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y xdotool
+        elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -S --noconfirm xdotool
+        elif command -v zypper >/dev/null 2>&1; then
+            sudo zypper install -y xdotool
+        else
+            warn "Please install xdotool manually"
+        fi
+    fi
+}
+
 # Get download URL
 get_download_url() {
     case "$OS" in
@@ -236,20 +256,6 @@ EOF
     success "Created $HOOKS_FILE"
 }
 
-# macOS permissions and Chrome setup
-setup_permissions() {
-    [ "$OS" != "macos" ] && return
-    
-    info "Checking macOS permissions..."
-    "$INSTALL_DIR/$BINARY_NAME" permissions 2>/dev/null || true
-    
-    # Check if Chrome JavaScript from Apple Events is enabled
-    echo ""
-    info "For YouTube auto-pause/resume, enable in Chrome:"
-    echo "    View > Developer > Allow JavaScript from Apple Events"
-    echo ""
-}
-
 # Success message
 print_success() {
     echo ""
@@ -263,15 +269,10 @@ print_success() {
     echo "  handles everything automatically!"
     echo ""
     if [ "$OS" = "macos" ]; then
-        echo "  Features:"
-        echo "    ✓ Auto-switch back to your previous app"
-        echo "    ✓ Auto-return to Cursor when AI finishes"
-        echo "    ✓ Menu bar status indicator"
-        echo "    ✓ YouTube auto-pause/resume (enable in Chrome)"
+        echo "  On first run, macOS will ask for Accessibility"
+        echo "  permission - just click Allow when prompted."
         echo ""
-        echo "  Note: Grant Accessibility permission if prompted."
     fi
-    echo ""
 }
 
 # Main
@@ -287,11 +288,11 @@ main() {
     detect_arch
     info "Detected: $OS ($ARCH)"
     
+    install_linux_deps
     get_download_url
     download_binary
     configure_hooks
     install_menubar
-    setup_permissions
     print_success
 }
 

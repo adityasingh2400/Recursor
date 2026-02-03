@@ -27,6 +27,36 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use platform::{create_window_manager, WindowManager};
 use state::StateManager;
+use std::path::PathBuf;
+
+/// Check if Recursor is enabled by reading the config file
+/// Returns true if enabled (default), false if explicitly disabled
+fn is_enabled() -> bool {
+    let config_path = get_config_path();
+    
+    if !config_path.exists() {
+        return true; // Default to enabled
+    }
+    
+    match std::fs::read_to_string(&config_path) {
+        Ok(contents) => {
+            // Parse JSON and check "enabled" field
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) {
+                return json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            }
+            true // Default to enabled if parse fails
+        }
+        Err(_) => true, // Default to enabled if read fails
+    }
+}
+
+/// Get the path to the config file
+fn get_config_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cursor")
+        .join("recursor_config.json")
+}
 
 /// Recursor - The "Bounce Back" Utility for Cursor AI Agents
 #[derive(Parser)]
@@ -95,6 +125,13 @@ fn run() -> Result<()> {
 
 /// Save command - called by beforeSubmitPrompt hook
 fn cmd_save(_no_focus: bool) -> Result<()> {
+    // Check if Recursor is enabled
+    if !is_enabled() {
+        // Just output allow response without any window management
+        hooks::write_output(&hooks::BeforeSubmitPromptOutput::allow())?;
+        return Ok(());
+    }
+
     let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
 
@@ -122,9 +159,20 @@ fn cmd_save(_no_focus: bool) -> Result<()> {
         None
     };
 
-    // Update menu bar status
+    // Update menu bar status with rich information
     if let Some(ref w) = window_to_save {
-        wm.update_menu_bar_status("working", Some(&w.title));
+        let media_playing = if w.app_name == "Google Chrome" {
+            Some(wm.is_youtube_playing())
+        } else {
+            None
+        };
+        wm.update_menu_bar_status_full(
+            "working",
+            Some("Agent working on task..."),
+            Some(&w.app_name),
+            Some(&w.title),
+            media_playing,
+        );
     }
 
     // Switch focus back to the previous app (so user can continue what they were doing)
@@ -151,6 +199,13 @@ fn cmd_save(_no_focus: bool) -> Result<()> {
 /// Restore command - called by stop hook when agent finishes
 /// ALWAYS brings user to Cursor so they can see the results
 fn cmd_restore() -> Result<()> {
+    // Check if Recursor is enabled
+    if !is_enabled() {
+        // Just output empty response without any window management
+        hooks::write_output(&hooks::StopOutput::empty())?;
+        return Ok(());
+    }
+
     let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
 
@@ -175,8 +230,14 @@ fn cmd_restore() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_millis(100));
     let _ = wm.focus_cursor();
 
-    // Update menu bar status
-    wm.update_menu_bar_status("idle", None);
+    // Update menu bar status - agent finished, now idle
+    wm.update_menu_bar_status_full(
+        "idle",
+        Some("Agent finished"),
+        None,
+        None,
+        None,
+    );
 
     // Clear the saved state for this conversation
     state_mgr.clear_conversation(&conversation_id)?;
@@ -192,7 +253,16 @@ fn cmd_restore() -> Result<()> {
 /// failsafe timer. If the command is still pending after 5 seconds, the failsafe
 /// brings the user to Cursor.
 fn cmd_before_shell() -> Result<()> {
+    // Check if Recursor is enabled
+    if !is_enabled() {
+        // Just allow the command without any window management
+        let output = serde_json::json!({ "permission": "allow" });
+        println!("{}", output);
+        return Ok(());
+    }
+
     let state_mgr = StateManager::new()?;
+    let wm = create_window_manager();
 
     // Read hook input to get the command
     let input: Option<hooks::BeforeShellInput> = hooks::try_read_input();
@@ -202,22 +272,33 @@ fn cmd_before_shell() -> Result<()> {
         .and_then(|i| i.common.conversation_id.clone())
         .unwrap_or_else(|| "default".to_string());
 
-    // Get current window
-    let wm = create_window_manager();
+    // Get current window and determine the secondary window to track
     let current_window = wm.get_active_window().ok();
     
-    // Only do something if user is NOT in Cursor
-    if let Some(ref current) = current_window {
-        if !current.is_cursor() {
-            // User is in another app (e.g., YouTube)
-            // Save state so we can bring them back after the command completes
-            let shell_conv_id = format!("{}_shell", conversation_id);
-            state_mgr.save_conversation(&shell_conv_id, current.clone(), None)?;
-            
-            // Spawn a 5-second failsafe timer
-            // If the command is still pending after 5 seconds, check-idle will bring user to Cursor
-            spawn_failsafe_timer(&conversation_id);
+    // Determine the secondary window (the one to return to after command completes)
+    // If user is in Cursor, get the previous window they were in
+    // If user is NOT in Cursor, use current window as secondary
+    let secondary_window = if let Some(ref current) = current_window {
+        if current.is_cursor() {
+            // User is in Cursor - get the previous window they came from
+            wm.get_previous_window().ok()
+        } else {
+            // User is in another app - that's our secondary window
+            Some(current.clone())
         }
+    } else {
+        None
+    };
+    
+    // Always save state and spawn failsafe timer
+    // This fixes the back-to-back command issue where command 2 fires while user is still in Cursor
+    if let Some(ref secondary) = secondary_window {
+        let shell_conv_id = format!("{}_shell", conversation_id);
+        state_mgr.save_conversation(&shell_conv_id, secondary.clone(), None)?;
+        
+        // Spawn a 5-second failsafe timer
+        // If the command is still pending after 5 seconds, check-idle will bring user to Cursor
+        spawn_failsafe_timer(&conversation_id);
     }
 
     // Always allow the command to proceed
@@ -271,6 +352,12 @@ fn spawn_failsafe_timer(conversation_id: &str) {
 /// AfterShell command - called after a shell command has run.
 /// Switch user back to where they were (e.g., YouTube) if we brought them to Cursor.
 fn cmd_after_shell() -> Result<()> {
+    // Check if Recursor is enabled
+    if !is_enabled() {
+        // No window management when disabled
+        return Ok(());
+    }
+
     let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
 
@@ -304,15 +391,24 @@ fn cmd_after_shell() -> Result<()> {
         let _ = wm.focus_window(prev);
         
         // Resume YouTube if it was Chrome
+        let mut media_playing = None;
         if prev.app_name == "Google Chrome" {
             std::thread::sleep(std::time::Duration::from_millis(150));
             wm.resume_youtube(&prev.title);
+            media_playing = Some(true); // We just resumed it
         }
         
         // Clear the shell-specific state
         state_mgr.clear_conversation(&shell_conv_id)?;
         
-        wm.update_menu_bar_status("working", Some(&prev.title));
+        // Update menu bar - command approved, back to working
+        wm.update_menu_bar_status_full(
+            "working",
+            Some("Agent working..."),
+            Some(&prev.app_name),
+            Some(&prev.title),
+            media_playing,
+        );
     }
 
     Ok(())
@@ -321,6 +417,12 @@ fn cmd_after_shell() -> Result<()> {
 /// CheckIdle command - failsafe that brings user to Cursor if shell command is still pending
 /// Called by background timer spawned in beforeShellExecution after 5 seconds
 fn cmd_check_idle(conversation_id: &str) -> Result<()> {
+    // Check if Recursor is enabled
+    if !is_enabled() {
+        // Don't pull user to Cursor when disabled
+        return Ok(());
+    }
+
     let wm = create_window_manager();
     let state_mgr = StateManager::new()?;
 
@@ -356,7 +458,13 @@ fn cmd_check_idle(conversation_id: &str) -> Result<()> {
         }
 
         // Update menu bar to indicate we're waiting for approval
-        wm.update_menu_bar_status("approval_needed", Some(&state.saved_window.title));
+        wm.update_menu_bar_status_full(
+            "approval_needed",
+            Some("Waiting for command approval..."),
+            Some(&state.saved_window.app_name),
+            Some(&state.saved_window.title),
+            Some(false), // YouTube is paused
+        );
     }
     // If state doesn't exist, command already finished - do nothing
 
