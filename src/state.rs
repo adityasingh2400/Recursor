@@ -96,9 +96,8 @@ impl StateManager {
 
         let json = fs::read_to_string(&self.state_path).context("Failed to read state file")?;
 
-        let mut state: RecursorState =
-            serde_json::from_str(&json).unwrap_or_default();
-        
+        let mut state: RecursorState = serde_json::from_str(&json).unwrap_or_default();
+
         // Clean up stale entries
         state.cleanup_stale();
 
@@ -120,10 +119,12 @@ impl StateManager {
         cursor_window: Option<WindowInfo>,
     ) -> Result<()> {
         let mut state = self.load_full()?;
-        
+
         let conv_state = ConversationState::new(saved_window, cursor_window);
-        state.conversations.insert(conversation_id.to_string(), conv_state);
-        
+        state
+            .conversations
+            .insert(conversation_id.to_string(), conv_state);
+
         self.save_full(&state)?;
         Ok(())
     }
@@ -157,6 +158,7 @@ impl StateManager {
     }
 
     /// Check if we should restore focus to Cursor for a conversation
+    #[allow(dead_code)]
     pub fn should_restore_cursor(
         &self,
         conversation_id: &str,

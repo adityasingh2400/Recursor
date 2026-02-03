@@ -9,6 +9,7 @@ use std::io::{self, BufRead, Write};
 
 /// Common fields present in all hook inputs
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct HookInput {
     /// Stable ID of the conversation
     #[serde(default)]
@@ -35,6 +36,7 @@ pub struct HookInput {
 
 /// Input for beforeSubmitPrompt hook
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct BeforeSubmitPromptInput {
     #[serde(flatten)]
     pub common: HookInput,
@@ -75,6 +77,7 @@ impl BeforeSubmitPromptOutput {
 
 /// Input for afterShellExecution hook
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct AfterShellInput {
     #[serde(flatten)]
     pub common: HookInput,
@@ -88,6 +91,7 @@ pub struct AfterShellInput {
 
 /// Input for beforeShellExecution hook
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct BeforeShellInput {
     #[serde(flatten)]
     pub common: HookInput,
@@ -98,6 +102,7 @@ pub struct BeforeShellInput {
 
 /// Input for stop hook
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct StopInput {
     #[serde(flatten)]
     pub common: HookInput,

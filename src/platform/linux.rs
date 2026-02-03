@@ -231,10 +231,7 @@ impl LinuxWindowManager {
             .as_ref()
             .ok_or_else(|| anyhow!("No X11 connection"))?;
 
-        let window_id: u32 = window
-            .window_id
-            .parse()
-            .context("Invalid window ID")?;
+        let window_id: u32 = window.window_id.parse().context("Invalid window ID")?;
 
         // Get _NET_ACTIVE_WINDOW atom for the request
         let active_atom = conn
@@ -255,8 +252,7 @@ impl LinuxWindowManager {
                 1u32, // Source indication: normal application
                 0,    // Timestamp (0 = current time)
                 0,    // Currently active window (0 = none)
-                0,
-                0,
+                0, 0,
             ]),
         };
 

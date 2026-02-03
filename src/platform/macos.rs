@@ -5,8 +5,8 @@
 
 use super::{WindowInfo, WindowManager};
 use anyhow::{anyhow, Context, Result};
-use std::process::Command;
 use rusqlite::Connection;
+use std::process::Command;
 
 /// macOS window manager implementation
 pub struct MacOSWindowManager;
@@ -66,7 +66,7 @@ impl MacOSWindowManager {
         if let Ok(result) = self.run_applescript(js_script) {
             return result == "paused";
         }
-        
+
         false
     }
 
@@ -101,10 +101,10 @@ impl MacOSWindowManager {
             end tell
         "#;
 
-        if let Ok(result) = self.run_applescript(&js_script) {
+        if let Ok(result) = self.run_applescript(js_script) {
             return result == "resumed";
         }
-        
+
         false
     }
 
@@ -140,11 +140,12 @@ impl MacOSWindowManager {
         if let Ok(result) = self.run_applescript(js_script) {
             return result == "playing";
         }
-        
+
         false
     }
 
     /// Update the menu bar status with rich information
+    #[allow(dead_code)]
     pub fn update_menu_bar_status(&self, status: &str, window_title: Option<&str>) {
         self.update_menu_bar_status_full(status, None, None, None, None);
         // Also update with window title for backwards compatibility
@@ -152,7 +153,7 @@ impl MacOSWindowManager {
             self.update_menu_bar_status_full(status, None, None, window_title, None);
         }
     }
-    
+
     /// Update the menu bar status with full details
     pub fn update_menu_bar_status_full(
         &self,
@@ -164,43 +165,46 @@ impl MacOSWindowManager {
     ) {
         let home = std::env::var("HOME").unwrap_or_default();
         let status_file = format!("{}/.cursor/recursor_status.json", home);
-        
+
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        
+
         // Build JSON with all available fields
         let mut json_parts = vec![
             format!(r#""status":"{}""#, status),
             format!(r#""timestamp":{}"#, timestamp),
         ];
-        
+
         if let Some(cs) = cursor_state {
             json_parts.push(format!(r#""cursor_state":"{}""#, cs.replace('"', "\\\"")));
         }
-        
+
         if let Some(app) = secondary_app {
             json_parts.push(format!(r#""secondary_app":"{}""#, app.replace('"', "\\\"")));
         }
-        
+
         if let Some(title) = secondary_title {
-            json_parts.push(format!(r#""secondary_title":"{}""#, title.replace('"', "\\\"")));
+            json_parts.push(format!(
+                r#""secondary_title":"{}""#,
+                title.replace('"', "\\\"")
+            ));
             // Also include "window" for backwards compatibility
             json_parts.push(format!(r#""window":"{}""#, title.replace('"', "\\\"")));
         }
-        
+
         if let Some(playing) = media_playing {
             json_parts.push(format!(r#""media_playing":{}"#, playing));
         }
-        
+
         let json = format!("{{{}}}", json_parts.join(","));
         let _ = std::fs::write(&status_file, json);
     }
 
     /// Get the previously active application (the one before the current frontmost app)
     /// This is useful when Cursor is frontmost and we want to know what app the user was in before
-    /// 
+    ///
     /// Uses lsappinfo's bringForwardOrder which tracks the actual app activation order.
     /// For Chrome specifically, we try to get the most recently focused window.
     pub fn get_previous_application(&self) -> Result<WindowInfo> {
@@ -215,7 +219,7 @@ impl MacOSWindowManager {
         }
 
         let output_str = String::from_utf8_lossy(&output.stdout);
-        
+
         // Parse bringForwardOrder to get app order
         // Format: bringForwardOrder = "Cursor" ASN:... "Terminal" ASN:... "Chrome" ASN:...
         if let Some(order_line) = output_str.lines().find(|l| l.contains("bringForwardOrder")) {
@@ -223,7 +227,7 @@ impl MacOSWindowManager {
             let mut apps: Vec<String> = Vec::new();
             let mut in_quotes = false;
             let mut current_app = String::new();
-            
+
             for ch in order_line.chars() {
                 if ch == '"' {
                     if in_quotes {
@@ -235,9 +239,10 @@ impl MacOSWindowManager {
                     current_app.push(ch);
                 }
             }
-            
+
             // Find the first non-Cursor app (that's the previous one)
-            for app_name in apps.iter().skip(1) {  // Skip first (current frontmost)
+            for app_name in apps.iter().skip(1) {
+                // Skip first (current frontmost)
                 if !app_name.to_lowercase().contains("cursor") {
                     // Get window info for this app using AppleScript
                     return self.get_app_window_info(app_name);
@@ -252,14 +257,14 @@ impl MacOSWindowManager {
     /// Get window info for a specific app by name
     fn get_app_window_info(&self, app_name: &str) -> Result<WindowInfo> {
         let escaped_name = app_name.replace('"', "\\\"");
-        
+
         // For Chrome, try multiple strategies to get the right window
         if app_name == "Google Chrome" {
             // Strategy 1: Check if there's a saved "last focused window" from our daemon
             if let Ok(saved) = self.get_chrome_saved_window() {
                 return Ok(saved);
             }
-            
+
             // Strategy 2: Use Chrome's scripting - get the first VISIBLE window
             // (visible windows are on the current Space)
             let script = r#"
@@ -284,14 +289,14 @@ impl MacOSWindowManager {
                     return "Google Chrome|" & chromePID & "|" & winTitle & "|" & winId
                 end tell
             "#;
-            
+
             if let Ok(result) = self.run_applescript(script) {
                 if let Ok(info) = self.parse_window_info(&result) {
                     return Ok(info);
                 }
             }
         }
-        
+
         // For Safari, use Safari's own scripting
         if app_name == "Safari" {
             let script = r#"
@@ -304,14 +309,14 @@ impl MacOSWindowManager {
                 end tell
                 return "Safari|" & safariPID & "|" & winTitle & "|1"
             "#;
-            
+
             if let Ok(result) = self.run_applescript(script) {
                 if let Ok(info) = self.parse_window_info(&result) {
                     return Ok(info);
                 }
             }
         }
-        
+
         // Default: use System Events (works for most apps)
         let script = format!(
             r#"
@@ -343,16 +348,16 @@ impl MacOSWindowManager {
         }
         self.parse_window_info(&result)
     }
-    
+
     /// Try to get saved Chrome window from our tracking file
     fn get_chrome_saved_window(&self) -> Result<WindowInfo> {
         let home = std::env::var("HOME").context("No HOME")?;
         let path = format!("{}/.cursor/recursor_chrome_window.txt", home);
-        
+
         if let Ok(content) = std::fs::read_to_string(&path) {
             // Format: title|timestamp
             let parts: Vec<&str> = content.trim().split('|').collect();
-            if parts.len() >= 1 {
+            if !parts.is_empty() {
                 let title = parts[0].to_string();
                 // Check if it's recent (within last 30 seconds)
                 if parts.len() >= 2 {
@@ -366,7 +371,7 @@ impl MacOSWindowManager {
                         }
                     }
                 }
-                
+
                 // Get Chrome's PID
                 let pid_script = r#"
                     tell application "System Events"
@@ -374,7 +379,7 @@ impl MacOSWindowManager {
                     end tell
                 "#;
                 let pid: u32 = self.run_applescript(pid_script)?.parse().unwrap_or(0);
-                
+
                 return Ok(WindowInfo {
                     pid,
                     window_id: "saved".to_string(),
@@ -383,7 +388,7 @@ impl MacOSWindowManager {
                 });
             }
         }
-        
+
         Err(anyhow!("No saved Chrome window"))
     }
 
@@ -440,7 +445,7 @@ impl WindowManager for MacOSWindowManager {
         let result = self.run_applescript(script)?;
         self.parse_window_info(&result)
     }
-    
+
     fn get_previous_window(&self) -> Result<WindowInfo> {
         self.get_previous_application()
     }
@@ -449,7 +454,7 @@ impl WindowManager for MacOSWindowManager {
         // Escape the app name for AppleScript
         let escaped_name = window.app_name.replace('"', "\\\"");
         let escaped_title = window.title.replace('"', "\\\"");
-        
+
         // For Chrome, use Chrome's own scripting to focus the correct window
         if window.app_name == "Google Chrome" && !window.title.is_empty() {
             let script = format!(
@@ -474,7 +479,7 @@ impl WindowManager for MacOSWindowManager {
                 return Ok(());
             }
         }
-        
+
         // For Safari, use Safari's own scripting
         if window.app_name == "Safari" && !window.title.is_empty() {
             let script = format!(
@@ -496,7 +501,7 @@ impl WindowManager for MacOSWindowManager {
                 return Ok(());
             }
         }
-        
+
         // Try to focus the specific window by title first using System Events
         if !window.title.is_empty() {
             let script = format!(
@@ -522,7 +527,7 @@ impl WindowManager for MacOSWindowManager {
                 return Ok(());
             }
         }
-        
+
         // Fallback: just activate the app
         let script = format!(
             r#"
@@ -547,11 +552,11 @@ impl WindowManager for MacOSWindowManager {
         self.run_applescript(script)?;
         Ok(())
     }
-    
+
     /// Focus a specific Cursor window by its title
     fn focus_cursor_window(&self, window: &WindowInfo) -> Result<()> {
         let escaped_title = window.title.replace('"', "\\\"");
-        
+
         // Try to focus the specific Cursor window by title
         if !window.title.is_empty() {
             let script = format!(
@@ -577,27 +582,27 @@ impl WindowManager for MacOSWindowManager {
                 return Ok(());
             }
         }
-        
+
         // Fallback to generic Cursor focus
         self.focus_cursor()
     }
-    
+
     fn pause_youtube_if_playing(&self, window_title: &str) -> bool {
         MacOSWindowManager::pause_youtube_if_playing(self, window_title)
     }
-    
+
     fn resume_youtube(&self, window_title: &str) -> bool {
         MacOSWindowManager::resume_youtube(self, window_title)
     }
-    
+
     fn update_menu_bar_status(&self, status: &str, window_title: Option<&str>) {
         MacOSWindowManager::update_menu_bar_status(self, status, window_title)
     }
-    
+
     fn is_youtube_playing(&self) -> bool {
         MacOSWindowManager::is_youtube_playing(self)
     }
-    
+
     fn update_menu_bar_status_full(
         &self,
         status: &str,
@@ -625,33 +630,33 @@ impl Default for MacOSWindowManager {
 
 /// Read Cursor's command allowlist from its SQLite database.
 /// Returns the list of commands that are auto-approved (won't need user confirmation).
+#[allow(dead_code)]
 pub fn read_cursor_allowlist() -> Result<Vec<String>> {
     let home = std::env::var("HOME").context("No HOME environment variable")?;
     let db_path = format!(
         "{}/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
         home
     );
-    
+
     // Open the database in read-only mode
     let conn = Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ).context("Failed to open Cursor state database")?;
-    
+    )
+    .context("Failed to open Cursor state database")?;
+
     // Query the persistent storage key
     let key = "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser";
     let value: String = conn
-        .query_row(
-            "SELECT value FROM ItemTable WHERE key = ?",
-            [key],
-            |row| row.get(0),
-        )
+        .query_row("SELECT value FROM ItemTable WHERE key = ?", [key], |row| {
+            row.get(0)
+        })
         .context("Failed to read persistent storage from Cursor database")?;
-    
+
     // Parse the JSON and extract yoloCommandAllowlist
-    let parsed: serde_json::Value = serde_json::from_str(&value)
-        .context("Failed to parse Cursor persistent storage JSON")?;
-    
+    let parsed: serde_json::Value =
+        serde_json::from_str(&value).context("Failed to parse Cursor persistent storage JSON")?;
+
     let allowlist = parsed
         .get("composerState")
         .and_then(|cs| cs.get("yoloCommandAllowlist"))
@@ -662,15 +667,16 @@ pub fn read_cursor_allowlist() -> Result<Vec<String>> {
                 .collect()
         })
         .unwrap_or_default();
-    
+
     Ok(allowlist)
 }
 
 /// Check if a command matches any entry in the allowlist.
 /// Cursor uses prefix matching - if the command starts with an allowlist entry, it's allowed.
+#[allow(dead_code)]
 pub fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
     let cmd_trimmed = command.trim();
-    
+
     for allowed in allowlist {
         // Exact match
         if cmd_trimmed == allowed {
@@ -684,6 +690,6 @@ pub fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
             }
         }
     }
-    
+
     false
 }

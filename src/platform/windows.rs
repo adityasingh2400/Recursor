@@ -11,7 +11,9 @@ use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use windows_sys::Win32::Foundation::{BOOL, HWND, MAX_PATH};
 use windows_sys::Win32::System::ProcessStatus::GetModuleBaseNameW;
-use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow, ShowWindow, SW_RESTORE,

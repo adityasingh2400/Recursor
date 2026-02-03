@@ -29,6 +29,7 @@ impl WindowInfo {
 }
 
 /// Trait for platform-specific window management operations
+#[allow(dead_code)]
 pub trait WindowManager {
     /// Get information about the currently active/focused window
     fn get_active_window(&self) -> Result<WindowInfo>;
@@ -56,27 +57,27 @@ pub trait WindowManager {
     fn is_cursor_window(&self, window: &WindowInfo) -> bool {
         window.is_cursor()
     }
-    
+
     /// Pause YouTube if playing in the given window (returns true if paused)
     fn pause_youtube_if_playing(&self, _window_title: &str) -> bool {
         false // Default: no-op
     }
-    
+
     /// Resume YouTube in the given window (returns true if resumed)
     fn resume_youtube(&self, _window_title: &str) -> bool {
         false // Default: no-op
     }
-    
+
     /// Check if YouTube is currently playing (without pausing)
     fn is_youtube_playing(&self) -> bool {
         false // Default: no-op
     }
-    
+
     /// Update menu bar status indicator (simple version)
     fn update_menu_bar_status(&self, _status: &str, _window_title: Option<&str>) {
         // Default: no-op
     }
-    
+
     /// Update menu bar status with full details
     fn update_menu_bar_status_full(
         &self,

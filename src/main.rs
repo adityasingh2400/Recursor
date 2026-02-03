@@ -33,16 +33,19 @@ use std::path::PathBuf;
 /// Returns true if enabled (default), false if explicitly disabled
 fn is_enabled() -> bool {
     let config_path = get_config_path();
-    
+
     if !config_path.exists() {
         return true; // Default to enabled
     }
-    
+
     match std::fs::read_to_string(&config_path) {
         Ok(contents) => {
             // Parse JSON and check "enabled" field
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) {
-                return json.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+                return json
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
             }
             true // Default to enabled if parse fails
         }
@@ -137,7 +140,7 @@ fn cmd_save(_no_focus: bool) -> Result<()> {
 
     // Read hook input from stdin (if available)
     let input: Option<hooks::BeforeSubmitPromptInput> = hooks::try_read_input();
-    
+
     // Get conversation_id from hook input, or use a default
     let conversation_id = input
         .as_ref()
@@ -179,10 +182,10 @@ fn cmd_save(_no_focus: bool) -> Result<()> {
     if let Some(ref prev) = previous_window {
         // Small delay to let the prompt submission complete
         std::thread::sleep(std::time::Duration::from_millis(50));
-        
+
         // Focus the previous window first
         let _ = wm.focus_window(prev);
-        
+
         // If it's Chrome, try to resume any YouTube video
         if prev.app_name == "Google Chrome" {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -211,7 +214,7 @@ fn cmd_restore() -> Result<()> {
 
     // Read hook input from stdin (if available)
     let input: Option<hooks::StopInput> = hooks::try_read_input();
-    
+
     // Get conversation_id from hook input
     let conversation_id = input
         .as_ref()
@@ -231,13 +234,7 @@ fn cmd_restore() -> Result<()> {
     let _ = wm.focus_cursor();
 
     // Update menu bar status - agent finished, now idle
-    wm.update_menu_bar_status_full(
-        "idle",
-        Some("Agent finished"),
-        None,
-        None,
-        None,
-    );
+    wm.update_menu_bar_status_full("idle", Some("Agent finished"), None, None, None);
 
     // Clear the saved state for this conversation
     state_mgr.clear_conversation(&conversation_id)?;
@@ -266,7 +263,7 @@ fn cmd_before_shell() -> Result<()> {
 
     // Read hook input to get the command
     let input: Option<hooks::BeforeShellInput> = hooks::try_read_input();
-    
+
     let conversation_id = input
         .as_ref()
         .and_then(|i| i.common.conversation_id.clone())
@@ -274,7 +271,7 @@ fn cmd_before_shell() -> Result<()> {
 
     // Get current window and determine the secondary window to track
     let current_window = wm.get_active_window().ok();
-    
+
     // Determine the secondary window (the one to return to after command completes)
     // If user is in Cursor, get the previous window they were in
     // If user is NOT in Cursor, use current window as secondary
@@ -289,13 +286,13 @@ fn cmd_before_shell() -> Result<()> {
     } else {
         None
     };
-    
+
     // Always save state and spawn failsafe timer
     // This fixes the back-to-back command issue where command 2 fires while user is still in Cursor
     if let Some(ref secondary) = secondary_window {
         let shell_conv_id = format!("{}_shell", conversation_id);
         state_mgr.save_conversation(&shell_conv_id, secondary.clone(), None)?;
-        
+
         // Spawn a 5-second failsafe timer
         // If the command is still pending after 5 seconds, check-idle will bring user to Cursor
         spawn_failsafe_timer(&conversation_id);
@@ -319,8 +316,7 @@ fn spawn_failsafe_timer(conversation_id: &str) {
         // On Unix, use sh -c with sleep and recursor check-idle
         let cmd = format!(
             "sleep 5 && {:?} check-idle {}",
-            recursor_path,
-            conversation_id
+            recursor_path, conversation_id
         );
         let _ = Command::new("sh")
             .arg("-c")
@@ -336,8 +332,7 @@ fn spawn_failsafe_timer(conversation_id: &str) {
         // On Windows, use cmd /c with timeout
         let cmd = format!(
             "timeout /t 5 /nobreak >nul && {:?} check-idle {}",
-            recursor_path,
-            conversation_id
+            recursor_path, conversation_id
         );
         let _ = Command::new("cmd")
             .arg("/c")
@@ -365,15 +360,13 @@ fn cmd_after_shell() -> Result<()> {
     use std::io::{self, BufRead};
     let stdin = io::stdin();
     let mut raw_input = String::new();
-    for line in stdin.lock().lines() {
-        if let Ok(l) = line {
-            raw_input.push_str(&l);
-            raw_input.push('\n');
-        }
+    for l in stdin.lock().lines().map_while(Result::ok) {
+        raw_input.push_str(&l);
+        raw_input.push('\n');
     }
-    
+
     let input: Option<hooks::AfterShellInput> = serde_json::from_str(&raw_input).ok();
-    
+
     let conversation_id = input
         .as_ref()
         .and_then(|i| i.common.conversation_id.clone())
@@ -381,15 +374,15 @@ fn cmd_after_shell() -> Result<()> {
 
     // Check for shell-specific saved state
     let shell_conv_id = format!("{}_shell", conversation_id);
-    
+
     if let Some(state) = state_mgr.load_conversation(&shell_conv_id)? {
         // We saved state in beforeShellExecution, meaning we brought user to Cursor
         // Now bring them back to where they were
         let prev = &state.saved_window;
-        
+
         std::thread::sleep(std::time::Duration::from_millis(100));
         let _ = wm.focus_window(prev);
-        
+
         // Resume YouTube if it was Chrome
         let mut media_playing = None;
         if prev.app_name == "Google Chrome" {
@@ -397,10 +390,10 @@ fn cmd_after_shell() -> Result<()> {
             wm.resume_youtube(&prev.title);
             media_playing = Some(true); // We just resumed it
         }
-        
+
         // Clear the shell-specific state
         state_mgr.clear_conversation(&shell_conv_id)?;
-        
+
         // Update menu bar - command approved, back to working
         wm.update_menu_bar_status_full(
             "working",
@@ -437,15 +430,15 @@ fn cmd_check_idle(conversation_id: &str) -> Result<()> {
             // Not enough time has passed, don't bring user to Cursor yet
             return Ok(());
         }
-        
+
         // State still exists after 5 seconds - command is likely waiting for approval
         // This is our failsafe: bring user to Cursor
-        
+
         // Pause YouTube if user was watching
         if state.saved_window.app_name == "Google Chrome" {
             wm.pause_youtube_if_playing(&state.saved_window.title);
         }
-        
+
         // Get the Cursor window from the main conversation state
         if let Some(main_state) = state_mgr.load_conversation(conversation_id)? {
             if let Some(ref cursor_win) = main_state.cursor_window {
@@ -476,7 +469,7 @@ fn cmd_status() -> Result<()> {
     let state_mgr = StateManager::new()?;
 
     let conversations = state_mgr.get_all_conversations()?;
-    
+
     if conversations.is_empty() {
         println!("No saved state.");
         return Ok(());
@@ -484,7 +477,7 @@ fn cmd_status() -> Result<()> {
 
     println!("Recursor State:");
     println!("===============");
-    
+
     for (conv_id, state) in conversations {
         println!("\nConversation: {}", conv_id);
         println!("  Saved Window:");
