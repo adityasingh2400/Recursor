@@ -211,6 +211,9 @@ mod tests {
             app_name: "Cursor".to_string(),
             title: "index.ts - My Cool Project - Cursor".to_string(),
         };
-        assert_eq!(w5.cursor_project_name(), Some("My Cool Project".to_string()));
+        assert_eq!(
+            w5.cursor_project_name(),
+            Some("My Cool Project".to_string())
+        );
     }
 }

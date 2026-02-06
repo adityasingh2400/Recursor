@@ -151,11 +151,10 @@ impl WindowsWindowManager {
                                 let actual_len =
                                     GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_len + 1);
                                 if actual_len > 0 {
-                                    let title = OsString::from_wide(
-                                        &title_buf[..actual_len as usize],
-                                    )
-                                    .to_string_lossy()
-                                    .to_lowercase();
+                                    let title =
+                                        OsString::from_wide(&title_buf[..actual_len as usize])
+                                            .to_string_lossy()
+                                            .to_lowercase();
                                     if title.contains(&data.search_lower) {
                                         data.target_hwnd = Some(hwnd);
                                         return 0; // Stop enumeration
