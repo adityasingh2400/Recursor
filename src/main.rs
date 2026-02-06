@@ -221,6 +221,9 @@ fn cmd_restore() -> Result<()> {
         .and_then(|i| i.common.conversation_id.clone())
         .unwrap_or_else(|| "default".to_string());
 
+    // Load saved state BEFORE clearing - we need the specific Cursor window info
+    let saved_state = state_mgr.load_conversation(&conversation_id)?;
+
     // Get current window to pause YouTube if needed
     let current_window = wm.get_active_window().ok();
     if let Some(ref current) = current_window {
@@ -229,9 +232,19 @@ fn cmd_restore() -> Result<()> {
         }
     }
 
-    // Small delay then ALWAYS bring user to Cursor
+    // Small delay then bring user to the CORRECT Cursor window.
+    // When multiple Cursor windows are open, we must focus the specific one
+    // where the prompt was submitted, not just any Cursor window.
     std::thread::sleep(std::time::Duration::from_millis(100));
-    let _ = wm.focus_cursor();
+    if let Some(ref state) = saved_state {
+        if let Some(ref cursor_win) = state.cursor_window {
+            let _ = wm.focus_cursor_window(cursor_win);
+        } else {
+            let _ = wm.focus_cursor();
+        }
+    } else {
+        let _ = wm.focus_cursor();
+    }
 
     // Update menu bar status - agent finished, now idle
     wm.update_menu_bar_status_full("idle", Some("Agent finished"), None, None, None);

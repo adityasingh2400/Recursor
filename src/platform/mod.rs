@@ -26,6 +26,37 @@ impl WindowInfo {
         let app_lower = self.app_name.to_lowercase();
         app_lower.contains("cursor")
     }
+
+    /// Extract the project/workspace name from a Cursor window title.
+    ///
+    /// Cursor window titles follow the format:
+    ///   "filename - ProjectName - Cursor"  (when a file is open)
+    ///   "ProjectName - Cursor"             (when no file is focused)
+    ///
+    /// The project name is stable even as the agent opens different files,
+    /// making it reliable for identifying which Cursor window to focus
+    /// when multiple windows are open.
+    pub fn cursor_project_name(&self) -> Option<String> {
+        // Cursor may use " — " (em dash) or " - " (hyphen-minus) as separators
+        for separator in [" \u{2014} ", " - "] {
+            let parts: Vec<&str> = self.title.split(separator).collect();
+            if parts.len() >= 3 {
+                // "filename - ProjectName - Cursor" -> "ProjectName"
+                let project = parts[parts.len() - 2].trim();
+                if !project.is_empty() {
+                    return Some(project.to_string());
+                }
+            } else if parts.len() == 2 {
+                // "ProjectName - Cursor" -> "ProjectName"
+                let candidate = parts[0].trim();
+                let suffix = parts[1].trim();
+                if suffix.eq_ignore_ascii_case("Cursor") && !candidate.is_empty() {
+                    return Some(candidate.to_string());
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Trait for platform-specific window management operations
@@ -133,5 +164,53 @@ mod tests {
             title: "YouTube".to_string(),
         };
         assert!(!chrome_window.is_cursor());
+    }
+
+    #[test]
+    fn test_cursor_project_name() {
+        // "filename - ProjectName - Cursor" -> "ProjectName"
+        let w = WindowInfo {
+            pid: 1,
+            window_id: "1".to_string(),
+            app_name: "Cursor".to_string(),
+            title: "main.rs - Recursor - Cursor".to_string(),
+        };
+        assert_eq!(w.cursor_project_name(), Some("Recursor".to_string()));
+
+        // "ProjectName - Cursor" -> "ProjectName"
+        let w2 = WindowInfo {
+            pid: 1,
+            window_id: "1".to_string(),
+            app_name: "Cursor".to_string(),
+            title: "Recursor - Cursor".to_string(),
+        };
+        assert_eq!(w2.cursor_project_name(), Some("Recursor".to_string()));
+
+        // Just "Cursor" -> None
+        let w3 = WindowInfo {
+            pid: 1,
+            window_id: "1".to_string(),
+            app_name: "Cursor".to_string(),
+            title: "Cursor".to_string(),
+        };
+        assert_eq!(w3.cursor_project_name(), None);
+
+        // Empty title -> None
+        let w4 = WindowInfo {
+            pid: 1,
+            window_id: "1".to_string(),
+            app_name: "Cursor".to_string(),
+            title: "".to_string(),
+        };
+        assert_eq!(w4.cursor_project_name(), None);
+
+        // Multi-word project name
+        let w5 = WindowInfo {
+            pid: 1,
+            window_id: "1".to_string(),
+            app_name: "Cursor".to_string(),
+            title: "index.ts - My Cool Project - Cursor".to_string(),
+        };
+        assert_eq!(w5.cursor_project_name(), Some("My Cool Project".to_string()));
     }
 }

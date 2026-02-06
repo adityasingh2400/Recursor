@@ -270,6 +270,48 @@ impl LinuxWindowManager {
         Ok(())
     }
 
+    /// Find a Cursor window whose title contains the given search string
+    fn find_cursor_window_by_title(&self, search: &str) -> Option<WindowInfo> {
+        let output = Command::new("wmctrl").args(["-l", "-p"]).output().ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let search_lower = search.to_lowercase();
+
+        for line in output_str.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 5 {
+                let window_id = parts[0];
+                let pid: u32 = parts[2].parse().unwrap_or(0);
+                let title = parts[4..].join(" ");
+
+                let app_name = if pid > 0 {
+                    std::fs::read_to_string(format!("/proc/{}/comm", pid))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
+                if app_name.to_lowercase().contains("cursor")
+                    && title.to_lowercase().contains(&search_lower)
+                {
+                    return Some(WindowInfo {
+                        pid,
+                        window_id: window_id.to_string(),
+                        app_name,
+                        title,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
     /// Find Cursor window
     fn find_cursor_window(&self) -> Option<WindowInfo> {
         // Try using wmctrl to list windows
@@ -355,6 +397,34 @@ impl WindowManager for LinuxWindowManager {
 
             Err(anyhow!("Cursor window not found"))
         }
+    }
+
+    fn focus_cursor_window(&self, window: &WindowInfo) -> Result<()> {
+        // Strategy 1: Try direct window ID focus (works if ID is still valid)
+        if self.focus_window(window).is_ok() {
+            return Ok(());
+        }
+
+        // Strategy 2: Search for Cursor window by project name
+        if let Some(project_name) = window.cursor_project_name() {
+            if let Some(target) = self.find_cursor_window_by_title(&project_name) {
+                if self.focus_window(&target).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Strategy 3: Search by full title
+        if !window.title.is_empty() {
+            if let Some(target) = self.find_cursor_window_by_title(&window.title) {
+                if self.focus_window(&target).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Strategy 4: Generic Cursor focus
+        self.focus_cursor()
     }
 }
 

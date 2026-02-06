@@ -554,36 +554,80 @@ impl WindowManager for MacOSWindowManager {
     }
 
     /// Focus a specific Cursor window by its title
+    ///
+    /// Uses a multi-strategy approach to reliably find the correct window
+    /// even when multiple Cursor windows are open:
+    ///
+    /// 1. Match by project name (stable - doesn't change when agent opens files)
+    /// 2. Match by full title (exact match fallback)
+    /// 3. Generic Cursor activation (last resort)
     fn focus_cursor_window(&self, window: &WindowInfo) -> Result<()> {
-        let escaped_title = window.title.replace('"', "\\\"");
-
-        // Try to focus the specific Cursor window by title
-        if !window.title.is_empty() {
+        // Strategy 1: Match by project/workspace name extracted from the title.
+        // Cursor titles follow "filename - ProjectName - Cursor". The filename
+        // changes as the agent opens different files, but the project name is
+        // constant. This reliably identifies the right window.
+        if let Some(project_name) = window.cursor_project_name() {
+            let escaped_project = project_name.replace('"', "\\\"");
             let script = format!(
                 r#"
                 tell application "System Events"
                     tell process "Cursor"
                         set frontmost to true
                         try
-                            -- Try to find and focus the specific window by title
-                            set targetWindow to first window whose name contains "{}"
-                            perform action "AXRaise" of targetWindow
+                            repeat with win in (every window)
+                                if name of win contains "{}" then
+                                    perform action "AXRaise" of win
+                                    tell application "Cursor" to activate
+                                    return "found"
+                                end if
+                            end repeat
                         end try
                     end tell
                 end tell
-                tell application "Cursor"
-                    activate
-                end tell
-            "#,
-                escaped_title
+                return "not_found"
+                "#,
+                escaped_project
             );
 
-            if self.run_applescript(&script).is_ok() {
-                return Ok(());
+            if let Ok(result) = self.run_applescript(&script) {
+                if result == "found" {
+                    return Ok(());
+                }
             }
         }
 
-        // Fallback to generic Cursor focus
+        // Strategy 2: Try full title match (works if title hasn't changed)
+        if !window.title.is_empty() {
+            let escaped_title = window.title.replace('"', "\\\"");
+            let script = format!(
+                r#"
+                tell application "System Events"
+                    tell process "Cursor"
+                        set frontmost to true
+                        try
+                            repeat with win in (every window)
+                                if name of win contains "{}" then
+                                    perform action "AXRaise" of win
+                                    tell application "Cursor" to activate
+                                    return "found"
+                                end if
+                            end repeat
+                        end try
+                    end tell
+                end tell
+                return "not_found"
+                "#,
+                escaped_title
+            );
+
+            if let Ok(result) = self.run_applescript(&script) {
+                if result == "found" {
+                    return Ok(());
+                }
+            }
+        }
+
+        // Strategy 3: Generic Cursor focus (last resort)
         self.focus_cursor()
     }
 
