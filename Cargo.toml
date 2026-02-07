@@ -26,6 +26,9 @@ thiserror = "1.0"
 # Home directory detection
 dirs = "5.0"
 
+# File locking for safe concurrent state access
+fs2 = "0.4"
+
 # SQLite for reading Cursor's allowlist
 rusqlite = { version = "0.31", features = ["bundled"] }
 

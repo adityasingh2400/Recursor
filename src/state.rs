@@ -10,6 +10,7 @@
 use crate::platform::WindowInfo;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -66,13 +67,33 @@ impl RecursorState {
 /// Manager for state file operations
 pub struct StateManager {
     state_path: PathBuf,
+    lock_path: PathBuf,
 }
 
 impl StateManager {
     /// Create a new state manager
     pub fn new() -> Result<Self> {
         let state_path = Self::get_state_path()?;
-        Ok(Self { state_path })
+        let lock_path = state_path.with_extension("lock");
+        Ok(Self {
+            state_path,
+            lock_path,
+        })
+    }
+
+    /// Acquire an exclusive file lock for safe concurrent access.
+    /// Returns the lock file which must be kept alive until the operation completes.
+    fn acquire_lock(&self) -> Result<fs::File> {
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.lock_path)
+            .context("Failed to open lock file")?;
+        lock_file
+            .lock_exclusive()
+            .context("Failed to acquire state file lock")?;
+        Ok(lock_file)
     }
 
     /// Get the path to the state file
@@ -111,13 +132,17 @@ impl StateManager {
         Ok(())
     }
 
-    /// Save state for a specific conversation
+    /// Save state for a specific conversation.
+    /// Uses file locking so concurrent Recursor processes (from multiple Cursor windows)
+    /// don't overwrite each other's data.
     pub fn save_conversation(
         &self,
         conversation_id: &str,
         saved_window: WindowInfo,
         cursor_window: Option<WindowInfo>,
     ) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+
         let mut state = self.load_full()?;
 
         let conv_state = ConversationState::new(saved_window, cursor_window);
@@ -125,7 +150,11 @@ impl StateManager {
             .conversations
             .insert(conversation_id.to_string(), conv_state);
 
+        // Clean up stale entries whenever we save new state
+        state.cleanup_stale();
+
         self.save_full(&state)?;
+        // Lock released when _lock is dropped
         Ok(())
     }
 
@@ -137,8 +166,13 @@ impl StateManager {
 
     /// Clear state for a specific conversation
     pub fn clear_conversation(&self, conversation_id: &str) -> Result<()> {
+        let _lock = self.acquire_lock()?;
         let mut state = self.load_full()?;
         state.conversations.remove(conversation_id);
+        
+        // Clean up stale entries when clearing conversations
+        state.cleanup_stale();
+        
         self.save_full(&state)?;
         Ok(())
     }
@@ -192,6 +226,14 @@ impl StateManager {
 impl Default for StateManager {
     fn default() -> Self {
         Self::new().expect("Failed to create state manager")
+    }
+}
+
+// Ensure lock is released if we hold one
+impl Drop for StateManager {
+    fn drop(&mut self) {
+        // Lock files are cleaned up by the OS when the File handle drops.
+        // The lock_path file itself is intentionally left on disk (it's tiny).
     }
 }
 

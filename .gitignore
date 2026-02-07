@@ -23,5 +23,8 @@ Desktop.ini
 # Linux
 *~
 
+# Internal ideas/notes
+IDEAS.md
+
 # Test artifacts
 *.log
