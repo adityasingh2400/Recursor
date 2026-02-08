@@ -9,6 +9,7 @@ INSTALL_DIR="$HOME/.cursor/bin"
 HOOKS_FILE="$HOME/.cursor/hooks.json"
 BINARY_NAME="recursor"
 MENUBAR_NAME="recursor-menubar"
+ICON_NAME="recursoricon.png"
 LAUNCHAGENT_DIR="$HOME/Library/LaunchAgents"
 LAUNCHAGENT_PLIST="com.recursor.menubar.plist"
 
@@ -72,6 +73,7 @@ get_download_url() {
     esac
     DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BINARY_FILE}"
     MENUBAR_URL="https://github.com/${REPO}/releases/latest/download/recursor-menubar"
+    ICON_URL="https://raw.githubusercontent.com/${REPO}/main/recursoricon.png"
 }
 
 # Download binary
@@ -142,6 +144,8 @@ build_menubar_app() {
     
     MENUBAR_SRC="$SRC_DIR/menubar/RecursorMenuBar.swift"
     MENUBAR_DEST="$INSTALL_DIR/$MENUBAR_NAME"
+    ICON_SRC="$SRC_DIR/$ICON_NAME"
+    ICON_DEST="$INSTALL_DIR/$ICON_NAME"
     
     if [ -f "$MENUBAR_SRC" ]; then
         swiftc -O -o "$MENUBAR_DEST" "$MENUBAR_SRC" 2>/dev/null || {
@@ -151,6 +155,30 @@ build_menubar_app() {
         chmod +x "$MENUBAR_DEST"
         success "Menu bar app built"
     fi
+
+    if [ -f "$ICON_SRC" ]; then
+        cp "$ICON_SRC" "$ICON_DEST"
+        success "Menu bar icon installed"
+    fi
+}
+
+# Install menu bar icon (macOS only)
+install_menubar_icon() {
+    [ "$OS" != "macos" ] && return
+
+    ICON_DEST="$INSTALL_DIR/$ICON_NAME"
+
+    # Prefer local repository icon when running installer from source
+    if [ -f "./$ICON_NAME" ]; then
+        cp "./$ICON_NAME" "$ICON_DEST"
+        return
+    fi
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$ICON_URL" -o "$ICON_DEST" 2>/dev/null || true
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$ICON_URL" -O "$ICON_DEST" 2>/dev/null || true
+    fi
 }
 
 # Install menu bar app (macOS only)
@@ -158,6 +186,7 @@ install_menubar() {
     [ "$OS" != "macos" ] && return
     
     info "Setting up menu bar status indicator..."
+    install_menubar_icon
     
     # Try to download pre-built menu bar app
     MENUBAR_DEST="$INSTALL_DIR/$MENUBAR_NAME"

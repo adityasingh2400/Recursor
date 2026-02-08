@@ -10,11 +10,11 @@
 use crate::platform::WindowInfo;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// State for a single conversation/window
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,33 +67,18 @@ impl RecursorState {
 /// Manager for state file operations
 pub struct StateManager {
     state_path: PathBuf,
-    lock_path: PathBuf,
 }
 
 impl StateManager {
     /// Create a new state manager
     pub fn new() -> Result<Self> {
         let state_path = Self::get_state_path()?;
-        let lock_path = state_path.with_extension("lock");
-        Ok(Self {
-            state_path,
-            lock_path,
-        })
+        Ok(Self { state_path })
     }
 
-    /// Acquire an exclusive file lock for safe concurrent access.
-    /// Returns the lock file which must be kept alive until the operation completes.
-    fn acquire_lock(&self) -> Result<fs::File> {
-        let lock_file = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&self.lock_path)
-            .context("Failed to open lock file")?;
-        lock_file
-            .lock_exclusive()
-            .context("Failed to acquire state file lock")?;
-        Ok(lock_file)
+    #[cfg(test)]
+    fn with_state_path(state_path: PathBuf) -> Self {
+        Self { state_path }
     }
 
     /// Get the path to the state file
@@ -118,9 +103,15 @@ impl StateManager {
         let json = fs::read_to_string(&self.state_path).context("Failed to read state file")?;
 
         let mut state: RecursorState = serde_json::from_str(&json).unwrap_or_default();
+        let before_cleanup = state.conversations.len();
 
         // Clean up stale entries
         state.cleanup_stale();
+        if state.conversations.len() != before_cleanup {
+            // Best-effort persistence of cleanup; stale entries can otherwise
+            // linger indefinitely if no new save operation occurs.
+            let _ = self.save_full(&state);
+        }
 
         Ok(state)
     }
@@ -128,21 +119,50 @@ impl StateManager {
     /// Save the full state
     fn save_full(&self, state: &RecursorState) -> Result<()> {
         let json = serde_json::to_string_pretty(state).context("Failed to serialize state")?;
-        fs::write(&self.state_path, json).context("Failed to write state file")?;
+        if let Some(parent) = self.state_path.parent() {
+            fs::create_dir_all(parent).context("Failed to create state directory")?;
+        }
+
+        let temp_path = self.temp_state_path();
+        fs::write(&temp_path, json).context("Failed to write temporary state file")?;
+        if let Err(err) = fs::rename(&temp_path, &self.state_path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(err).context("Failed to replace state file atomically");
+        }
         Ok(())
     }
 
-    /// Save state for a specific conversation.
-    /// Uses file locking so concurrent Recursor processes (from multiple Cursor windows)
-    /// don't overwrite each other's data.
+    fn temp_state_path(&self) -> PathBuf {
+        let parent = self
+            .state_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let file_name = self
+            .state_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("recursor_state.json");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
+        parent.join(format!(
+            "{}.tmp.{}.{}",
+            file_name,
+            std::process::id(),
+            nonce
+        ))
+    }
+
+    /// Save state for a specific conversation
     pub fn save_conversation(
         &self,
         conversation_id: &str,
         saved_window: WindowInfo,
         cursor_window: Option<WindowInfo>,
     ) -> Result<()> {
-        let _lock = self.acquire_lock()?;
-
         let mut state = self.load_full()?;
 
         let conv_state = ConversationState::new(saved_window, cursor_window);
@@ -150,11 +170,7 @@ impl StateManager {
             .conversations
             .insert(conversation_id.to_string(), conv_state);
 
-        // Clean up stale entries whenever we save new state
-        state.cleanup_stale();
-
         self.save_full(&state)?;
-        // Lock released when _lock is dropped
         Ok(())
     }
 
@@ -166,13 +182,8 @@ impl StateManager {
 
     /// Clear state for a specific conversation
     pub fn clear_conversation(&self, conversation_id: &str) -> Result<()> {
-        let _lock = self.acquire_lock()?;
         let mut state = self.load_full()?;
         state.conversations.remove(conversation_id);
-        
-        // Clean up stale entries when clearing conversations
-        state.cleanup_stale();
-        
         self.save_full(&state)?;
         Ok(())
     }
@@ -229,28 +240,118 @@ impl Default for StateManager {
     }
 }
 
-// Ensure lock is released if we hold one
-impl Drop for StateManager {
-    fn drop(&mut self) {
-        // Lock files are cleaned up by the OS when the File handle drops.
-        // The lock_path file itself is intentionally left on disk (it's tiny).
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration as ChronoDuration;
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_window() -> WindowInfo {
+        WindowInfo {
+            pid: 1234,
+            window_id: "test:1".to_string(),
+            app_name: "Test".to_string(),
+            title: "Test Window".to_string(),
+        }
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "recursor_state_{}_{}_{}",
+            label,
+            std::process::id(),
+            nonce
+        ));
+        fs::create_dir_all(&dir).expect("failed to create temp test dir");
+        dir
+    }
 
     #[test]
     fn test_state_staleness() {
-        let window = WindowInfo {
-            pid: 1234,
-            window_id: "test".to_string(),
-            app_name: "Test".to_string(),
-            title: "Test Window".to_string(),
-        };
-
-        let state = ConversationState::new(window, None);
+        let state = ConversationState::new(test_window(), None);
         assert!(!state.is_stale());
+    }
+
+    #[test]
+    fn stale_conversations_are_persistently_cleaned_up() {
+        let dir = unique_test_dir("stale_cleanup");
+        let state_path = dir.join("recursor_state.json");
+        let manager = StateManager::with_state_path(state_path.clone());
+
+        let mut conversations = HashMap::new();
+        conversations.insert(
+            "stale".to_string(),
+            ConversationState {
+                saved_window: test_window(),
+                cursor_window: None,
+                saved_at: Utc::now() - ChronoDuration::hours(2),
+                user_switched: false,
+            },
+        );
+        conversations.insert(
+            "fresh".to_string(),
+            ConversationState {
+                saved_window: test_window(),
+                cursor_window: None,
+                saved_at: Utc::now(),
+                user_switched: false,
+            },
+        );
+        let state = RecursorState { conversations };
+        let json = serde_json::to_string_pretty(&state).expect("serialize state");
+        fs::write(&state_path, json).expect("write initial state");
+
+        let loaded = manager.get_all_conversations().expect("load state");
+        assert!(loaded.contains_key("fresh"));
+        assert!(!loaded.contains_key("stale"));
+
+        let persisted_json = fs::read_to_string(&state_path).expect("read persisted state");
+        let persisted: RecursorState =
+            serde_json::from_str(&persisted_json).expect("parse persisted state");
+        assert!(persisted.conversations.contains_key("fresh"));
+        assert!(!persisted.conversations.contains_key("stale"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_conversation_does_not_leave_tmp_files() {
+        let dir = unique_test_dir("tmp_cleanup");
+        let state_path = dir.join("recursor_state.json");
+        let manager = StateManager::with_state_path(state_path.clone());
+
+        manager
+            .save_conversation("conv-1", test_window(), None)
+            .expect("save state");
+
+        assert!(state_path.exists());
+
+        let has_tmp = fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".tmp."));
+        assert!(!has_tmp);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_json_falls_back_to_default_state() {
+        let dir = unique_test_dir("invalid_json");
+        let state_path = dir.join("recursor_state.json");
+        let manager = StateManager::with_state_path(state_path.clone());
+
+        fs::write(&state_path, "{invalid").expect("write invalid json");
+        let loaded = manager
+            .get_all_conversations()
+            .expect("load should not fail");
+        assert!(loaded.is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

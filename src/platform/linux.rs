@@ -216,7 +216,7 @@ impl LinuxWindowManager {
                 .args(["-i", "-a", &window.window_id])
                 .output();
 
-            if wmctrl_output.is_err() || !wmctrl_output.unwrap().status.success() {
+            if !matches!(wmctrl_output, Ok(output) if output.status.success()) {
                 return Err(anyhow!("Failed to focus window"));
             }
         }

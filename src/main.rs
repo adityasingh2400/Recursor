@@ -28,6 +28,9 @@ use clap::{Parser, Subcommand};
 use platform::{create_window_manager, WindowManager};
 use state::StateManager;
 use std::path::PathBuf;
+use std::time::Duration;
+
+const SHELL_FAILSAFE_DELAY_SECONDS: u64 = 5;
 
 /// Check if Recursor is enabled by reading the config file
 /// Returns true if enabled (default), false if explicitly disabled
@@ -101,6 +104,9 @@ enum Commands {
     CheckIdle {
         /// The conversation ID to check
         conversation_id: String,
+        /// Delay before checking pending state (used by failsafe timer process)
+        #[arg(long, default_value_t = 0)]
+        delay_seconds: u64,
     },
 }
 
@@ -122,12 +128,15 @@ fn run() -> Result<()> {
         Commands::Status => cmd_status(),
         Commands::Permissions => cmd_permissions(),
         Commands::Clear => cmd_clear(),
-        Commands::CheckIdle { conversation_id } => cmd_check_idle(&conversation_id),
+        Commands::CheckIdle {
+            conversation_id,
+            delay_seconds,
+        } => cmd_check_idle(&conversation_id, delay_seconds),
     }
 }
 
 /// Save command - called by beforeSubmitPrompt hook
-fn cmd_save(_no_focus: bool) -> Result<()> {
+fn cmd_save(no_focus: bool) -> Result<()> {
     // Check if Recursor is enabled
     if !is_enabled() {
         // Just output allow response without any window management
@@ -153,14 +162,13 @@ fn cmd_save(_no_focus: bool) -> Result<()> {
     // Get the previous app the user was using (before they switched to Cursor)
     let previous_window = wm.get_previous_window().ok();
 
-    // Save state: we need to remember the Cursor window to come back to
-    let window_to_save = if let Some(ref cw) = cursor_window {
-        let w = previous_window.clone().unwrap_or_else(|| cw.clone());
+    // Save state: remember the window to return to after commands are approved.
+    // Prefer the previous app, but fall back to the current Cursor window if needed.
+    let window_to_save = select_window_to_save(cursor_window.clone(), previous_window.clone());
+
+    if let Some(ref w) = window_to_save {
         state_mgr.save_conversation(&conversation_id, w.clone(), cursor_window.clone())?;
-        Some(w)
-    } else {
-        None
-    };
+    }
 
     // Update menu bar status with rich information
     if let Some(ref w) = window_to_save {
@@ -178,18 +186,20 @@ fn cmd_save(_no_focus: bool) -> Result<()> {
         );
     }
 
-    // Switch focus back to the previous app (so user can continue what they were doing)
-    if let Some(ref prev) = previous_window {
-        // Small delay to let the prompt submission complete
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // Switch focus back to the previous app (unless explicitly disabled).
+    if !no_focus {
+        if let Some(ref prev) = previous_window {
+            // Small delay to let the prompt submission complete.
+            std::thread::sleep(Duration::from_millis(50));
 
-        // Focus the previous window first
-        let _ = wm.focus_window(prev);
+            // Focus the previous window first.
+            let _ = wm.focus_window(prev);
 
-        // If it's Chrome, try to resume any YouTube video
-        if prev.app_name == "Google Chrome" {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            wm.resume_youtube(&prev.title);
+            // If it's Chrome, resume only if a YouTube tab is paused.
+            if prev.app_name == "Google Chrome" {
+                std::thread::sleep(Duration::from_millis(150));
+                let _ = wm.resume_youtube(&prev.title);
+            }
         }
     }
 
@@ -224,18 +234,45 @@ fn cmd_restore() -> Result<()> {
     // Load saved state BEFORE clearing - we need the specific Cursor window info
     let saved_state = state_mgr.load_conversation(&conversation_id)?;
 
-    // Get current window to pause YouTube if needed
-    let current_window = wm.get_active_window().ok();
-    if let Some(ref current) = current_window {
-        if current.app_name == "Google Chrome" {
-            wm.pause_youtube_if_playing(&current.title);
+    // Pause YouTube if the saved previous window was Chrome with YouTube
+    // We use the saved state (not get_active_window) because Cursor may already
+    // have focus by the time this hook fires
+    if let Some(ref state) = saved_state {
+        if state.saved_window.app_name == "Google Chrome" && state.saved_window.pid > 0 {
+            let script = format!(
+                r#"
+                tell application "System Events"
+                    set chromeProc to first application process whose unix id is {}
+                    set allWins to every window of chromeProc
+                    set winCount to count of allWins
+                    repeat with i from 1 to winCount
+                        try
+                            set winName to name of item i of allWins
+                            if winName contains "YouTube" and winName contains "Audio playing" then
+                                set frontmost of chromeProc to true
+                                delay 0.15
+                                perform action "AXRaise" of (item i of allWins)
+                                delay 0.2
+                                keystroke "k"
+                                return "paused"
+                            end if
+                        end try
+                    end repeat
+                    return "not_playing"
+                end tell
+                "#,
+                state.saved_window.pid
+            );
+            let _ = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output();
         }
     }
 
     // Small delay then bring user to the CORRECT Cursor window.
     // When multiple Cursor windows are open, we must focus the specific one
     // where the prompt was submitted, not just any Cursor window.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(100));
     if let Some(ref state) = saved_state {
         if let Some(ref cursor_win) = state.cursor_window {
             let _ = wm.focus_cursor_window(cursor_win);
@@ -324,37 +361,18 @@ fn spawn_failsafe_timer(conversation_id: &str) {
     // Get the path to the recursor binary
     let recursor_path = std::env::current_exe().unwrap_or_else(|_| "recursor".into());
 
-    #[cfg(unix)]
-    {
-        // On Unix, use sh -c with sleep and recursor check-idle
-        let cmd = format!(
-            "sleep 5 && {:?} check-idle {}",
-            recursor_path, conversation_id
-        );
-        let _ = Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, use cmd /c with timeout
-        let cmd = format!(
-            "timeout /t 5 /nobreak >nul && {:?} check-idle {}",
-            recursor_path, conversation_id
-        );
-        let _ = Command::new("cmd")
-            .arg("/c")
-            .arg(&cmd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
+    // Spawn a detached check-idle process that sleeps internally before checking.
+    // This avoids shell interpolation issues for conversation IDs and binary paths.
+    let _ = Command::new(recursor_path)
+        .arg("check-idle")
+        .arg("--delay-seconds")
+        .arg(SHELL_FAILSAFE_DELAY_SECONDS.to_string())
+        .arg("--")
+        .arg(conversation_id)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 /// AfterShell command - called after a shell command has run.
@@ -393,15 +411,14 @@ fn cmd_after_shell() -> Result<()> {
         // Now bring them back to where they were
         let prev = &state.saved_window;
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
         let _ = wm.focus_window(prev);
 
         // Resume YouTube if it was Chrome
         let mut media_playing = None;
         if prev.app_name == "Google Chrome" {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            wm.resume_youtube(&prev.title);
-            media_playing = Some(true); // We just resumed it
+            std::thread::sleep(Duration::from_millis(150));
+            media_playing = Some(wm.resume_youtube(&prev.title));
         }
 
         // Clear the shell-specific state
@@ -422,11 +439,15 @@ fn cmd_after_shell() -> Result<()> {
 
 /// CheckIdle command - failsafe that brings user to Cursor if shell command is still pending
 /// Called by background timer spawned in beforeShellExecution after 5 seconds
-fn cmd_check_idle(conversation_id: &str) -> Result<()> {
+fn cmd_check_idle(conversation_id: &str, delay_seconds: u64) -> Result<()> {
     // Check if Recursor is enabled
     if !is_enabled() {
         // Don't pull user to Cursor when disabled
         return Ok(());
+    }
+
+    if delay_seconds > 0 {
+        std::thread::sleep(Duration::from_secs(delay_seconds));
     }
 
     let wm = create_window_manager();
@@ -439,7 +460,7 @@ fn cmd_check_idle(conversation_id: &str) -> Result<()> {
         // Verify that at least 5 seconds have actually elapsed since state was saved
         // This prevents race conditions where timer fires but command just started
         let elapsed = Utc::now() - state.saved_at;
-        if elapsed.num_seconds() < 5 {
+        if elapsed.num_seconds() < SHELL_FAILSAFE_DELAY_SECONDS as i64 {
             // Not enough time has passed, don't bring user to Cursor yet
             return Ok(());
         }
@@ -447,10 +468,14 @@ fn cmd_check_idle(conversation_id: &str) -> Result<()> {
         // State still exists after 5 seconds - command is likely waiting for approval
         // This is our failsafe: bring user to Cursor
 
-        // Pause YouTube if user was watching
-        if state.saved_window.app_name == "Google Chrome" {
-            wm.pause_youtube_if_playing(&state.saved_window.title);
-        }
+        // Pause YouTube if user was watching.
+        let media_playing = if state.saved_window.app_name == "Google Chrome"
+            && wm.pause_youtube_if_playing(&state.saved_window.title)
+        {
+            Some(false)
+        } else {
+            None
+        };
 
         // Get the Cursor window from the main conversation state
         if let Some(main_state) = state_mgr.load_conversation(conversation_id)? {
@@ -469,12 +494,19 @@ fn cmd_check_idle(conversation_id: &str) -> Result<()> {
             Some("Waiting for command approval..."),
             Some(&state.saved_window.app_name),
             Some(&state.saved_window.title),
-            Some(false), // YouTube is paused
+            media_playing,
         );
     }
     // If state doesn't exist, command already finished - do nothing
 
     Ok(())
+}
+
+fn select_window_to_save(
+    cursor_window: Option<platform::WindowInfo>,
+    previous_window: Option<platform::WindowInfo>,
+) -> Option<platform::WindowInfo> {
+    previous_window.or(cursor_window)
 }
 
 /// Status command - show current saved state
@@ -570,4 +602,40 @@ fn cmd_clear() -> Result<()> {
     state_mgr.clear()?;
     println!("Saved state cleared.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(app_name: &str, title: &str, pid: u32) -> platform::WindowInfo {
+        platform::WindowInfo {
+            pid,
+            window_id: format!("{}:1", pid),
+            app_name: app_name.to_string(),
+            title: title.to_string(),
+        }
+    }
+
+    #[test]
+    fn select_window_to_save_prefers_previous_window() {
+        let cursor = window("Cursor", "main.rs - Recursor - Cursor", 100);
+        let previous = window("Google Chrome", "YouTube", 200);
+
+        let selected = select_window_to_save(Some(cursor), Some(previous.clone()));
+        assert_eq!(selected, Some(previous));
+    }
+
+    #[test]
+    fn select_window_to_save_falls_back_to_cursor_window() {
+        let cursor = window("Cursor", "main.rs - Recursor - Cursor", 100);
+
+        let selected = select_window_to_save(Some(cursor.clone()), None);
+        assert_eq!(selected, Some(cursor));
+    }
+
+    #[test]
+    fn select_window_to_save_handles_missing_windows() {
+        assert_eq!(select_window_to_save(None, None), None);
+    }
 }

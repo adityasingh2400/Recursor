@@ -6,7 +6,15 @@
 use super::{WindowInfo, WindowManager};
 use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
+use serde_json::{Map, Value};
+use std::path::PathBuf;
 use std::process::Command;
+
+/// Helper struct for ASN query results
+struct AsnInfo {
+    pid: u32,
+    is_cursor_child: bool,
+}
 
 /// macOS window manager implementation
 pub struct MacOSWindowManager;
@@ -163,43 +171,22 @@ impl MacOSWindowManager {
         secondary_title: Option<&str>,
         media_playing: Option<bool>,
     ) {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let status_file = format!("{}/.cursor/recursor_status.json", home);
+        let Some(cursor_dir) = Self::cursor_dir() else {
+            return;
+        };
+        let status_file = cursor_dir.join("recursor_status.json");
+        let _ = std::fs::create_dir_all(&cursor_dir);
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        // Build JSON with all available fields
-        let mut json_parts = vec![
-            format!(r#""status":"{}""#, status),
-            format!(r#""timestamp":{}"#, timestamp),
-        ];
-
-        if let Some(cs) = cursor_state {
-            json_parts.push(format!(r#""cursor_state":"{}""#, cs.replace('"', "\\\"")));
+        let payload = Self::build_status_payload(
+            status,
+            cursor_state,
+            secondary_app,
+            secondary_title,
+            media_playing,
+        );
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let _ = std::fs::write(&status_file, json);
         }
-
-        if let Some(app) = secondary_app {
-            json_parts.push(format!(r#""secondary_app":"{}""#, app.replace('"', "\\\"")));
-        }
-
-        if let Some(title) = secondary_title {
-            json_parts.push(format!(
-                r#""secondary_title":"{}""#,
-                title.replace('"', "\\\"")
-            ));
-            // Also include "window" for backwards compatibility
-            json_parts.push(format!(r#""window":"{}""#, title.replace('"', "\\\"")));
-        }
-
-        if let Some(playing) = media_playing {
-            json_parts.push(format!(r#""media_playing":{}"#, playing));
-        }
-
-        let json = format!("{{{}}}", json_parts.join(","));
-        let _ = std::fs::write(&status_file, json);
     }
 
     /// Get the previously active application (the one before the current frontmost app)
@@ -220,38 +207,149 @@ impl MacOSWindowManager {
 
         let output_str = String::from_utf8_lossy(&output.stdout);
 
-        // Parse bringForwardOrder to get app order
-        // Format: bringForwardOrder = "Cursor" ASN:... "Terminal" ASN:... "Chrome" ASN:...
+        // Parse bringForwardOrder to get (app_name, ASN) pairs
         if let Some(order_line) = output_str.lines().find(|l| l.contains("bringForwardOrder")) {
-            // Extract app names in order (they're in quotes)
-            let mut apps: Vec<String> = Vec::new();
-            let mut in_quotes = false;
-            let mut current_app = String::new();
+            let pairs = Self::parse_bring_forward_order(order_line);
 
-            for ch in order_line.chars() {
-                if ch == '"' {
-                    if in_quotes {
-                        apps.push(current_app.clone());
-                        current_app.clear();
+            // Skip first entry (frontmost = Cursor), find the real previous app
+            for (app_name, asn) in pairs.iter().skip(1) {
+                if app_name.to_lowercase().contains("cursor") {
+                    continue;
+                }
+
+                // For Chrome, we must verify this isn't Cursor's headless Chrome
+                if app_name == "Google Chrome" {
+                    if let Some(info) = Self::query_asn_info(asn) {
+                        if info.is_cursor_child {
+                            continue; // Skip Cursor's Chrome extension host
+                        }
+                        if info.pid > 0 {
+                            // Get window title using PID-based System Events
+                            let title = Self::get_window_title_by_pid(info.pid);
+                            return Ok(WindowInfo {
+                                pid: info.pid,
+                                window_id: format!("{}:1", info.pid),
+                                app_name: "Google Chrome".to_string(),
+                                title,
+                            });
+                        }
                     }
-                    in_quotes = !in_quotes;
-                } else if in_quotes {
-                    current_app.push(ch);
                 }
-            }
 
-            // Find the first non-Cursor app (that's the previous one)
-            for app_name in apps.iter().skip(1) {
-                // Skip first (current frontmost)
-                if !app_name.to_lowercase().contains("cursor") {
-                    // Get window info for this app using AppleScript
-                    return self.get_app_window_info(app_name);
-                }
+                // Non-Chrome app — use standard approach
+                return self.get_app_window_info(app_name);
             }
         }
 
         // Fallback to Finder
         self.get_app_window_info("Finder")
+    }
+
+    /// Parse bringForwardOrder line into (app_name, ASN) pairs
+    fn parse_bring_forward_order(line: &str) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
+        let mut i = 0;
+        let chars: Vec<char> = line.chars().collect();
+        while i < chars.len() {
+            if chars[i] == '"' {
+                i += 1;
+                let mut name = String::new();
+                while i < chars.len() && chars[i] != '"' {
+                    name.push(chars[i]);
+                    i += 1;
+                }
+                i += 1; // skip closing quote
+                        // Now find the ASN (e.g., ASN:0x0-0x123123:)
+                while i < chars.len() && chars[i] == ' ' {
+                    i += 1;
+                }
+                let mut asn = String::new();
+                while i < chars.len() && chars[i] != ' ' && chars[i] != '"' {
+                    asn.push(chars[i]);
+                    i += 1;
+                }
+                if !name.is_empty() {
+                    pairs.push((name, asn));
+                }
+            } else {
+                i += 1;
+            }
+        }
+        pairs
+    }
+
+    /// Query lsappinfo for detailed info about an ASN
+    fn query_asn_info(asn: &str) -> Option<AsnInfo> {
+        let output = Command::new("lsappinfo")
+            .args(["info", asn])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        let mut pid: u32 = 0;
+        let mut parent_asn = String::new();
+
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("pid") && trimmed.contains('=') {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    pid = val.trim().parse().unwrap_or(0);
+                }
+            }
+            if trimmed.starts_with("\"parentASN\"") && trimmed.contains('=') {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    parent_asn = val.trim().trim_matches('"').to_string();
+                }
+            }
+        }
+
+        // Check if parent is Cursor
+        let is_cursor_child = if !parent_asn.is_empty() && parent_asn != "ASN:0x0-0x0:" {
+            if let Ok(parent_out) = Command::new("lsappinfo")
+                .args(["info", &parent_asn])
+                .output()
+            {
+                let parent_text = String::from_utf8_lossy(&parent_out.stdout);
+                parent_text.contains("Cursor")
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        Some(AsnInfo {
+            pid,
+            is_cursor_child,
+        })
+    }
+
+    /// Get the title of the frontmost window for a process by PID
+    fn get_window_title_by_pid(pid: u32) -> String {
+        let script = format!(
+            r#"
+            tell application "System Events"
+                set targetProc to first application process whose unix id is {}
+                set allWins to every window of targetProc
+                set winCount to count of allWins
+                repeat with i from 1 to winCount
+                    try
+                        set winName to name of item i of allWins
+                        if winName is not "" then
+                            return winName
+                        end if
+                    end try
+                end repeat
+                return ""
+            end tell
+            "#,
+            pid
+        );
+        Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
     }
 
     /// Get window info for a specific app by name
@@ -366,7 +464,7 @@ impl MacOSWindowManager {
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_secs())
                             .unwrap_or(0);
-                        if now - ts > 30 {
+                        if now.saturating_sub(ts) > 30 {
                             return Err(anyhow!("Saved window too old"));
                         }
                     }
@@ -394,18 +492,29 @@ impl MacOSWindowManager {
 
     /// Parse window info from AppleScript output format: "appName|pid|title|windowIndex"
     fn parse_window_info(&self, result: &str) -> Result<WindowInfo> {
-        let parts: Vec<&str> = result.splitn(4, '|').collect();
+        let mut first_split = result.splitn(3, '|');
+        let app_name = first_split
+            .next()
+            .ok_or_else(|| anyhow!("Unexpected AppleScript output: {}", result))?;
+        let pid_part = first_split
+            .next()
+            .ok_or_else(|| anyhow!("Unexpected AppleScript output: {}", result))?;
+        let title_and_index = first_split.next().unwrap_or("");
 
-        if parts.len() < 2 {
+        let (title, window_index) =
+            if let Some((title, window_index)) = title_and_index.rsplit_once('|') {
+                (title, window_index)
+            } else {
+                (title_and_index, "1")
+            };
+
+        if app_name.is_empty() {
             return Err(anyhow!("Unexpected AppleScript output: {}", result));
         }
 
-        let app_name = parts[0].to_string();
-        let pid: u32 = parts[1]
+        let pid: u32 = pid_part
             .parse()
             .context("Failed to parse PID from AppleScript")?;
-        let title = parts.get(2).unwrap_or(&"").to_string();
-        let window_index = parts.get(3).unwrap_or(&"1").to_string();
 
         // Use PID and window index as window ID
         let window_id = format!("{}:{}", pid, window_index);
@@ -413,9 +522,50 @@ impl MacOSWindowManager {
         Ok(WindowInfo {
             pid,
             window_id,
-            app_name,
-            title,
+            app_name: app_name.to_string(),
+            title: title.to_string(),
         })
+    }
+
+    fn cursor_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|h| h.join(".cursor"))
+    }
+
+    fn build_status_payload(
+        status: &str,
+        cursor_state: Option<&str>,
+        secondary_app: Option<&str>,
+        secondary_title: Option<&str>,
+        media_playing: Option<bool>,
+    ) -> Value {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let mut payload = Map::new();
+        payload.insert("status".to_string(), Value::String(status.to_string()));
+        payload.insert("timestamp".to_string(), Value::Number(timestamp.into()));
+
+        if let Some(cs) = cursor_state {
+            payload.insert("cursor_state".to_string(), Value::String(cs.to_string()));
+        }
+        if let Some(app) = secondary_app {
+            payload.insert("secondary_app".to_string(), Value::String(app.to_string()));
+        }
+        if let Some(title) = secondary_title {
+            payload.insert(
+                "secondary_title".to_string(),
+                Value::String(title.to_string()),
+            );
+            // Backwards compatibility with older menu bar versions.
+            payload.insert("window".to_string(), Value::String(title.to_string()));
+        }
+        if let Some(playing) = media_playing {
+            payload.insert("media_playing".to_string(), Value::Bool(playing));
+        }
+
+        Value::Object(payload)
     }
 }
 
@@ -455,24 +605,38 @@ impl WindowManager for MacOSWindowManager {
         let escaped_name = window.app_name.replace('"', "\\\"");
         let escaped_title = window.title.replace('"', "\\\"");
 
-        // For Chrome, use Chrome's own scripting to focus the correct window
-        if window.app_name == "Google Chrome" && !window.title.is_empty() {
+        // For Chrome, use PID-based System Events targeting to avoid hitting
+        // Cursor's headless Chrome extension process
+        if window.app_name == "Google Chrome" && window.pid > 0 {
+            let escaped_title_for_chrome = window.title.replace('"', "\\\"");
             let script = format!(
                 r#"
-                tell application "Google Chrome"
-                    activate
-                    set targetIndex to 1
-                    repeat with win in (every window)
-                        if title of win contains "{}" then
-                            set index of win to 1
-                            set active tab index of win to (active tab index of win)
-                            exit repeat
-                        end if
-                        set targetIndex to targetIndex + 1
+                tell application "System Events"
+                    set chromeProc to first application process whose unix id is {}
+                    set frontmost of chromeProc to true
+                    delay 0.1
+                    set allWins to every window of chromeProc
+                    set winCount to count of allWins
+                    if "{}" is not "" then
+                        repeat with i from 1 to winCount
+                            try
+                                set winName to name of item i of allWins
+                                if winName contains "{}" then
+                                    perform action "AXRaise" of (item i of allWins)
+                                    return "ok"
+                                end if
+                            end try
+                        end repeat
+                    end if
+                    repeat with i from 1 to winCount
+                        try
+                            perform action "AXRaise" of (item i of allWins)
+                            return "ok"
+                        end try
                     end repeat
                 end tell
                 "#,
-                escaped_title
+                window.pid, escaped_title_for_chrome, escaped_title_for_chrome
             );
 
             if self.run_applescript(&script).is_ok() {
@@ -736,4 +900,64 @@ pub fn is_command_allowed(command: &str, allowlist: &[String]) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_window_info_supports_pipe_in_title() {
+        let wm = MacOSWindowManager::new();
+        let info = wm
+            .parse_window_info("Google Chrome|123|YouTube | Live | Music|7")
+            .expect("parse should succeed");
+
+        assert_eq!(info.app_name, "Google Chrome");
+        assert_eq!(info.pid, 123);
+        assert_eq!(info.title, "YouTube | Live | Music");
+        assert_eq!(info.window_id, "123:7");
+    }
+
+    #[test]
+    fn build_status_payload_handles_special_characters() {
+        let payload = MacOSWindowManager::build_status_payload(
+            "working",
+            Some("Agent says \"ok\""),
+            Some("Google Chrome"),
+            Some("Line 1\nLine 2 \\ path"),
+            Some(false),
+        );
+
+        assert_eq!(payload["status"], "working");
+        assert_eq!(payload["cursor_state"], "Agent says \"ok\"");
+        assert_eq!(payload["secondary_app"], "Google Chrome");
+        assert_eq!(payload["secondary_title"], "Line 1\nLine 2 \\ path");
+        assert_eq!(payload["window"], "Line 1\nLine 2 \\ path");
+        assert_eq!(payload["media_playing"], false);
+        assert!(payload["timestamp"].is_number());
+    }
+
+    #[test]
+    fn parse_bring_forward_order_extracts_name_and_asn() {
+        let line =
+            "bringForwardOrder=\"Cursor\" ASN:0x0-0x11111: \"Google Chrome\" ASN:0x0-0x22222:";
+        let pairs = MacOSWindowManager::parse_bring_forward_order(line);
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(
+            pairs[0],
+            ("Cursor".to_string(), "ASN:0x0-0x11111:".to_string())
+        );
+        assert_eq!(
+            pairs[1],
+            ("Google Chrome".to_string(), "ASN:0x0-0x22222:".to_string())
+        );
+    }
+
+    #[test]
+    fn command_allowlist_prefix_is_boundary_aware() {
+        let allowlist = vec!["git commit".to_string()];
+        assert!(is_command_allowed("git commit -m test", &allowlist));
+        assert!(!is_command_allowed("git committed", &allowlist));
+    }
 }
